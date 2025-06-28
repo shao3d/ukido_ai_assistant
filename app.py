@@ -333,4 +333,7 @@ def hubspot_webhook():
 
 # --- ТОЧКА ВХОДА В ПРОГРАММУ ---
 if __name__ == '__main__':
-    app.run(debug=True, port=5000)
+    # Получаем порт от Railway через переменную окружения, 
+    # если она есть, иначе используем 5000 для локальной разработки
+    port = int(os.environ.get('PORT', 5000))
+    app.run(debug=True, port=port, host='0.0.0.0')
