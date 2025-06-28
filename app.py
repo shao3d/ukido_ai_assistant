@@ -51,7 +51,9 @@ def get_pinecone_indexes():
     """
     if not hasattr(get_pinecone_indexes, 'initialized'):
         try:
-            # Создаем соединения только при первом обращении
+            # Добавляем диагностическое логирование
+            print(f"🔍 ДИАГНОСТИКА: PINECONE_HOST_FACTS = {os.getenv('PINECONE_HOST_FACTS')}")
+            print(f"🔍 ДИАГНОСТИКА: PINECONE_HOST_STYLE = {os.getenv('PINECONE_HOST_STYLE')}")
             get_pinecone_indexes.pc = Pinecone(api_key=PINECONE_API_KEY)
             get_pinecone_indexes.index_facts = get_pinecone_indexes.pc.Index(host=PINECONE_HOST_FACTS)
             get_pinecone_indexes.index_style = get_pinecone_indexes.pc.Index(host=PINECONE_HOST_STYLE)
