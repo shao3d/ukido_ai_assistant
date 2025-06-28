@@ -43,25 +43,31 @@ embedding_model = 'models/text-embedding-004'
 
 def get_pinecone_indexes():
     """
-    Ленивая инициализация соединений с Pinecone
-    
-    Вместо создания соединений при запуске приложения, мы создаем их только
-    когда они действительно нужны. Это делает приложение более устойчивым
-    к временным проблемам с сетью и ускоряет время запуска.
+    Ленивая инициализация соединений с Pinecone (обновленная версия)
     """
     if not hasattr(get_pinecone_indexes, 'initialized'):
         try:
-            # Добавляем диагностическое логирование
-            print(f"🔍 ДИАГНОСТИКА: PINECONE_HOST_FACTS = {os.getenv('PINECONE_HOST_FACTS')}")
-            print(f"🔍 ДИАГНОСТИКА: PINECONE_HOST_STYLE = {os.getenv('PINECONE_HOST_STYLE')}")
-            get_pinecone_indexes.pc = Pinecone(api_key=PINECONE_API_KEY)
-            get_pinecone_indexes.index_facts = get_pinecone_indexes.pc.Index(host=PINECONE_HOST_FACTS)
-            get_pinecone_indexes.index_style = get_pinecone_indexes.pc.Index(host=PINECONE_HOST_STYLE)
+            print("🔍 Инициализируем Pinecone client...")
+            pc = Pinecone(api_key=PINECONE_API_KEY)
+            
+            # Динамически получаем актуальные host URLs
+            print("🔍 Получаем актуальную информацию об индексах...")
+            facts_description = pc.describe_index("ukido")
+            style_description = pc.describe_index("ukido-style")
+            
+            print(f"🔍 Facts индекс host: {facts_description.host}")
+            print(f"🔍 Style индекс host: {style_description.host}")
+            
+            # Создаем подключения с актуальными host URLs
+            get_pinecone_indexes.pc = pc
+            get_pinecone_indexes.index_facts = pc.Index(host=facts_description.host)
+            get_pinecone_indexes.index_style = pc.Index(host=style_description.host)
             get_pinecone_indexes.initialized = True
+            
             print("✅ Соединения с Pinecone инициализированы успешно")
+            
         except Exception as e:
             print(f"❌ Ошибка инициализации Pinecone: {e}")
-            # Не устанавливаем флаг initialized, чтобы можно было попробовать снова позже
             raise e
     
     return get_pinecone_indexes.index_facts, get_pinecone_indexes.index_style
