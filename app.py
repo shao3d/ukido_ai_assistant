@@ -17,41 +17,17 @@ PINECONE_HOST_FACTS = os.getenv("PINECONE_HOST_FACTS")
 PINECONE_HOST_STYLE = os.getenv("PINECONE_HOST_STYLE")
 HUBSPOT_API_KEY = os.getenv("HUBSPOT_API_KEY")
 
-# === ПОЛНАЯ ДИАГНОСТИКА ОКРУЖЕНИЯ ===
-print("=== ДИАГНОСТИКА ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ===")
-print(f"Общее количество переменных окружения: {len(os.environ)}")
-
-print("\nRailway-специфичные переменные:")
-railway_vars = {k: v for k, v in os.environ.items() if 'RAILWAY' in k.upper()}
-for key, value in railway_vars.items():
-    print(f"  {key} = {value}")
-
-print(f"\nНайдено Railway переменных: {len(railway_vars)}")
-
-print("\nНаши целевые переменные:")
-target_vars = ['TELEGRAM_BOT_TOKEN', 'GEMINI_API_KEY', 'PINECONE_API_KEY', 
-               'PINECONE_HOST_FACTS', 'PINECONE_HOST_STYLE', 'HUBSPOT_API_KEY']
-
-for var_name in target_vars:
-    value = os.environ.get(var_name)
-    if value:
-        display_value = value[:8] + "..." if len(value) > 8 else value
-        print(f"  {var_name} = {display_value}")
-    else:
-        print(f"  {var_name} = ОТСУТСТВУЕТ")
-
-print("\nПервые 15 переменных окружения (для общего понимания):")
-for i, (key, value) in enumerate(os.environ.items()):
-    if i >= 15:
-        break
-    display_value = value[:10] + "..." if len(value) > 10 else value
-    print(f"  {key} = {display_value}")
-
-print("=== КОНЕЦ ДИАГНОСТИКИ ===")
-
-# Временно отключаем жесткую проверку, чтобы получить диагностическую информацию
-print("\nПРИЛОЖЕНИЕ ЗАПУЩЕНО В ДИАГНОСТИЧЕСКОМ РЕЖИМЕ")
-print("Проверка переменных отключена для получения полной диагностики")
+if not all([TELEGRAM_BOT_TOKEN, GEMINI_API_KEY, PINECONE_API_KEY, PINECONE_HOST_FACTS, PINECONE_HOST_STYLE, HUBSPOT_API_KEY]):
+    required_vars = {
+        'TELEGRAM_BOT_TOKEN': TELEGRAM_BOT_TOKEN,
+        'GEMINI_API_KEY': GEMINI_API_KEY, 
+        'PINECONE_API_KEY': PINECONE_API_KEY,
+        'PINECONE_HOST_FACTS': PINECONE_HOST_FACTS,
+        'PINECONE_HOST_STYLE': PINECONE_HOST_STYLE,
+        'HUBSPOT_API_KEY': HUBSPOT_API_KEY
+    }
+    missing_vars = [name for name, value in required_vars.items() if not value]
+    raise ValueError(f"Отсутствуют обязательные переменные: {', '.join(missing_vars)}")
 
 # --- КОНФИГУРАЦИЯ КЛИЕНТОВ ---
 genai.configure(api_key=GEMINI_API_KEY)
@@ -490,18 +466,5 @@ if __name__ == '__main__':
     
     print(f"🚀 Запуск Flask приложения на порту {port}")
     print(f"🔧 Debug режим: {'включен' if debug_mode else 'отключен'}")
-    
-    # --- ВОССТАНОВЛЕНИЕ ЖЕСТКОЙ ПРОВЕРКИ ПЕРЕМЕННЫХ ---
-    if not all([TELEGRAM_BOT_TOKEN, GEMINI_API_KEY, PINECONE_API_KEY, PINECONE_HOST_FACTS, PINECONE_HOST_STYLE, HUBSPOT_API_KEY]):
-        required_vars = {
-            'TELEGRAM_BOT_TOKEN': TELEGRAM_BOT_TOKEN,
-            'GEMINI_API_KEY': GEMINI_API_KEY, 
-            'PINECONE_API_KEY': PINECONE_API_KEY,
-            'PINECONE_HOST_FACTS': PINECONE_HOST_FACTS,
-            'PINECONE_HOST_STYLE': PINECONE_HOST_STYLE,
-            'HUBSPOT_API_KEY': HUBSPOT_API_KEY
-        }
-        missing_vars = [name for name, value in required_vars.items() if not value]
-        raise ValueError(f"Отсутствуют обязательные переменные: {', '.join(missing_vars)}")
     
     app.run(debug=debug_mode, port=port, host='0.0.0.0')
