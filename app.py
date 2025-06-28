@@ -17,19 +17,41 @@ PINECONE_HOST_FACTS = os.getenv("PINECONE_HOST_FACTS")
 PINECONE_HOST_STYLE = os.getenv("PINECONE_HOST_STYLE")
 HUBSPOT_API_KEY = os.getenv("HUBSPOT_API_KEY")
 
-# Временно упрощенная проверка только критически важных переменных
-if not TELEGRAM_BOT_TOKEN:
-    raise ValueError("TELEGRAM_BOT_TOKEN обязателен для работы бота")
-if not GEMINI_API_KEY:
-    raise ValueError("GEMINI_API_KEY обязателен для работы AI")
+# === ПОЛНАЯ ДИАГНОСТИКА ОКРУЖЕНИЯ ===
+print("=== ДИАГНОСТИКА ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ===")
+print(f"Общее количество переменных окружения: {len(os.environ)}")
 
-# Диагностическая информация
-print("=== ДИАГНОСТИКА ПЕРЕМЕННЫХ ===")
-print(f"TELEGRAM_BOT_TOKEN: {'найден' if TELEGRAM_BOT_TOKEN else 'отсутствует'}")
-print(f"GEMINI_API_KEY: {'найден' if GEMINI_API_KEY else 'отсутствует'}")
-print(f"PINECONE_API_KEY: {'найден' if PINECONE_API_KEY else 'отсутствует'}")
-print(f"HUBSPOT_API_KEY: {'найден' if HUBSPOT_API_KEY else 'отсутствует'}")
-print("=============================")
+print("\nRailway-специфичные переменные:")
+railway_vars = {k: v for k, v in os.environ.items() if 'RAILWAY' in k.upper()}
+for key, value in railway_vars.items():
+    print(f"  {key} = {value}")
+
+print(f"\nНайдено Railway переменных: {len(railway_vars)}")
+
+print("\nНаши целевые переменные:")
+target_vars = ['TELEGRAM_BOT_TOKEN', 'GEMINI_API_KEY', 'PINECONE_API_KEY', 
+               'PINECONE_HOST_FACTS', 'PINECONE_HOST_STYLE', 'HUBSPOT_API_KEY']
+
+for var_name in target_vars:
+    value = os.environ.get(var_name)
+    if value:
+        display_value = value[:8] + "..." if len(value) > 8 else value
+        print(f"  {var_name} = {display_value}")
+    else:
+        print(f"  {var_name} = ОТСУТСТВУЕТ")
+
+print("\nПервые 15 переменных окружения (для общего понимания):")
+for i, (key, value) in enumerate(os.environ.items()):
+    if i >= 15:
+        break
+    display_value = value[:10] + "..." if len(value) > 10 else value
+    print(f"  {key} = {display_value}")
+
+print("=== КОНЕЦ ДИАГНОСТИКИ ===")
+
+# Временно отключаем жесткую проверку, чтобы получить диагностическую информацию
+print("\nПРИЛОЖЕНИЕ ЗАПУЩЕНО В ДИАГНОСТИЧЕСКОМ РЕЖИМЕ")
+print("Проверка переменных отключена для получения полной диагностики")
 
 # --- КОНФИГУРАЦИЯ КЛИЕНТОВ ---
 genai.configure(api_key=GEMINI_API_KEY)
