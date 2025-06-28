@@ -5,7 +5,7 @@ import google.generativeai as genai
 from flask import Flask, request, render_template
 # --------------------
 from dotenv import load_dotenv
-# from pinecone import Pinecone  # Временно отключено для диагностики
+from pinecone import Pinecone  # Восстановлен импорт Pinecone
 
 # --- НАСТРОЙКИ И ЗАГРУЗКА КЛЮЧЕЙ ---
 load_dotenv()
@@ -67,11 +67,24 @@ embedding_model = 'models/text-embedding-004'
 
 def get_pinecone_indexes():
     """
-    Временная заглушка для Pinecone соединений
-    Возвращает None, чтобы указать, что RAG система недоступна
+    Ленивая инициализация соединений с Pinecone
+    
+    Вместо создания соединений при запуске приложения, мы создаем их только
+    когда они действительно нужны. Это делает приложение более устойчивым
+    к временным проблемам с сетью и ускоряет время запуска.
     """
-    print("⚠️ Pinecone временно отключен для диагностики")
-    raise Exception("Pinecone недоступен в диагностическом режиме")
+    if not hasattr(get_pinecone_indexes, 'initialized'):
+        try:
+            # Создаем соединения только при первом обращении
+            get_pinecone_indexes.pc = Pinecone(api_key=PINECONE_API_KEY)
+            get_pinecone_indexes.index_facts = get_pinecone_indexes.pc.Index(host=PINECONE_HOST_FACTS)
+            get_pinecone_indexes.index_style = get_pinecone_indexes.pc.Index(host=PINECONE_HOST_STYLE)
+            get_pinecone_indexes.initialized = True
+            print("✅ Соединения с Pinecone инициализированы успешно")
+        except Exception as e:
+            print(f"❌ Ошибка инициализации Pinecone: {e}")
+            # Не устанавливаем флаг initialized, чтобы можно было попробовать снова позже
+            raise e
     
     return get_pinecone_indexes.index_facts, get_pinecone_indexes.index_style
 
@@ -279,11 +292,6 @@ def get_gemini_response(chat_id, prompt):
     
 def send_to_hubspot(user_data):
     """Отправляет данные пользователя в HubSpot CRM"""
-    # Временная заглушка для диагностики
-    print("⚠️ HubSpot интеграция временно отключена для диагностики")
-    print(f"Данные, которые были бы отправлены: {user_data}")
-    return True  # Имитируем успешную отправку
-    
     # URL для создания контактов в HubSpot API
     hubspot_url = "https://api.hubapi.com/crm/v3/objects/contacts"
     
@@ -482,5 +490,18 @@ if __name__ == '__main__':
     
     print(f"🚀 Запуск Flask приложения на порту {port}")
     print(f"🔧 Debug режим: {'включен' if debug_mode else 'отключен'}")
+    
+    # --- ВОССТАНОВЛЕНИЕ ЖЕСТКОЙ ПРОВЕРКИ ПЕРЕМЕННЫХ ---
+    if not all([TELEGRAM_BOT_TOKEN, GEMINI_API_KEY, PINECONE_API_KEY, PINECONE_HOST_FACTS, PINECONE_HOST_STYLE, HUBSPOT_API_KEY]):
+        required_vars = {
+            'TELEGRAM_BOT_TOKEN': TELEGRAM_BOT_TOKEN,
+            'GEMINI_API_KEY': GEMINI_API_KEY, 
+            'PINECONE_API_KEY': PINECONE_API_KEY,
+            'PINECONE_HOST_FACTS': PINECONE_HOST_FACTS,
+            'PINECONE_HOST_STYLE': PINECONE_HOST_STYLE,
+            'HUBSPOT_API_KEY': HUBSPOT_API_KEY
+        }
+        missing_vars = [name for name, value in required_vars.items() if not value]
+        raise ValueError(f"Отсутствуют обязательные переменные: {', '.join(missing_vars)}")
     
     app.run(debug=debug_mode, port=port, host='0.0.0.0')
