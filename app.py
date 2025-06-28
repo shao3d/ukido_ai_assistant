@@ -5,7 +5,7 @@ import google.generativeai as genai
 from flask import Flask, request, render_template
 # --------------------
 from dotenv import load_dotenv
-from pinecone import Pinecone
+# from pinecone import Pinecone  # Временно отключено для диагностики
 
 # --- НАСТРОЙКИ И ЗАГРУЗКА КЛЮЧЕЙ ---
 load_dotenv()
@@ -17,20 +17,19 @@ PINECONE_HOST_FACTS = os.getenv("PINECONE_HOST_FACTS")
 PINECONE_HOST_STYLE = os.getenv("PINECONE_HOST_STYLE")
 HUBSPOT_API_KEY = os.getenv("HUBSPOT_API_KEY")
 
-# ИСПРАВЛЕНИЕ 1: Добавлена проверка HUBSPOT_API_KEY в список обязательных переменных
-# Раньше эта переменная загружалась, но не проверялась, что могло приводить к ошибкам
-if not all([TELEGRAM_BOT_TOKEN, GEMINI_API_KEY, PINECONE_API_KEY, PINECONE_HOST_FACTS, PINECONE_HOST_STYLE, HUBSPOT_API_KEY]):
-    # Более информативная диагностика - показываем какие именно переменные отсутствуют
-    required_vars = {
-        'TELEGRAM_BOT_TOKEN': TELEGRAM_BOT_TOKEN,
-        'GEMINI_API_KEY': GEMINI_API_KEY, 
-        'PINECONE_API_KEY': PINECONE_API_KEY,
-        'PINECONE_HOST_FACTS': PINECONE_HOST_FACTS,
-        'PINECONE_HOST_STYLE': PINECONE_HOST_STYLE,
-        'HUBSPOT_API_KEY': HUBSPOT_API_KEY
-    }
-    missing_vars = [name for name, value in required_vars.items() if not value]
-    raise ValueError(f"Отсутствуют обязательные переменные: {', '.join(missing_vars)}")
+# Временно упрощенная проверка только критически важных переменных
+if not TELEGRAM_BOT_TOKEN:
+    raise ValueError("TELEGRAM_BOT_TOKEN обязателен для работы бота")
+if not GEMINI_API_KEY:
+    raise ValueError("GEMINI_API_KEY обязателен для работы AI")
+
+# Диагностическая информация
+print("=== ДИАГНОСТИКА ПЕРЕМЕННЫХ ===")
+print(f"TELEGRAM_BOT_TOKEN: {'найден' if TELEGRAM_BOT_TOKEN else 'отсутствует'}")
+print(f"GEMINI_API_KEY: {'найден' if GEMINI_API_KEY else 'отсутствует'}")
+print(f"PINECONE_API_KEY: {'найден' if PINECONE_API_KEY else 'отсутствует'}")
+print(f"HUBSPOT_API_KEY: {'найден' if HUBSPOT_API_KEY else 'отсутствует'}")
+print("=============================")
 
 # --- КОНФИГУРАЦИЯ КЛИЕНТОВ ---
 genai.configure(api_key=GEMINI_API_KEY)
@@ -46,27 +45,11 @@ embedding_model = 'models/text-embedding-004'
 
 def get_pinecone_indexes():
     """
-    ИСПРАВЛЕНИЕ 2: Ленивая инициализация Pinecone соединений
-    
-    Вместо создания соединений при запуске приложения, мы создаем их только
-    когда они действительно нужны. Это делает приложение более устойчивым
-    к временным проблемам с сетью и ускоряет время запуска.
-    
-    Паттерн "ленивой инициализации" широко используется в облачных приложениях
-    для повышения надежности и производительности.
+    Временная заглушка для Pinecone соединений
+    Возвращает None, чтобы указать, что RAG система недоступна
     """
-    if not hasattr(get_pinecone_indexes, 'initialized'):
-        try:
-            # Создаем соединения только при первом обращении
-            get_pinecone_indexes.pc = Pinecone(api_key=PINECONE_API_KEY)
-            get_pinecone_indexes.index_facts = get_pinecone_indexes.pc.Index(host=PINECONE_HOST_FACTS)
-            get_pinecone_indexes.index_style = get_pinecone_indexes.pc.Index(host=PINECONE_HOST_STYLE)
-            get_pinecone_indexes.initialized = True
-            print("✅ Pinecone соединения инициализированы успешно")
-        except Exception as e:
-            print(f"❌ Ошибка инициализации Pinecone: {e}")
-            # Не устанавливаем флаг initialized, чтобы можно было попробовать снова позже
-            raise e
+    print("⚠️ Pinecone временно отключен для диагностики")
+    raise Exception("Pinecone недоступен в диагностическом режиме")
     
     return get_pinecone_indexes.index_facts, get_pinecone_indexes.index_style
 
@@ -274,6 +257,11 @@ def get_gemini_response(chat_id, prompt):
     
 def send_to_hubspot(user_data):
     """Отправляет данные пользователя в HubSpot CRM"""
+    # Временная заглушка для диагностики
+    print("⚠️ HubSpot интеграция временно отключена для диагностики")
+    print(f"Данные, которые были бы отправлены: {user_data}")
+    return True  # Имитируем успешную отправку
+    
     # URL для создания контактов в HubSpot API
     hubspot_url = "https://api.hubapi.com/crm/v3/objects/contacts"
     
