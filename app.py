@@ -5,6 +5,7 @@ from flask import Flask, request, render_template
 from dotenv import load_dotenv
 from pinecone import Pinecone
 import redis
+import time
 
 # --- НАСТРОЙКИ И ЗАГРУЗКА КЛЮЧЕЙ ---
 load_dotenv()
@@ -16,72 +17,72 @@ PINECONE_HOST_FACTS = os.getenv("PINECONE_HOST_FACTS")
 HUBSPOT_API_KEY = os.getenv("HUBSPOT_API_KEY")
 REDIS_URL = os.getenv("REDIS_URL")
 
-# Проверяем переменные, включая Redis
+# Проверяем наличие всех обязательных переменных
 if not all([TELEGRAM_BOT_TOKEN, GEMINI_API_KEY, PINECONE_API_KEY, PINECONE_HOST_FACTS, HUBSPOT_API_KEY, REDIS_URL]):
     required_vars = {
-        'TELEGRAM_BOT_TOKEN': TELEGRAM_BOT_TOKEN,
-        'GEMINI_API_KEY': GEMINI_API_KEY, 
-        'PINECONE_API_KEY': PINECONE_API_KEY,
-        'PINECONE_HOST_FACTS': PINECONE_HOST_FACTS,
-        'HUBSPOT_API_KEY': HUBSPOT_API_KEY,
-        'REDIS_URL': REDIS_URL
+        'TELEGRAM_BOT_TOKEN': TELEGRAM_BOT_TOKEN, 'GEMINI_API_KEY': GEMINI_API_KEY, 
+        'PINECONE_API_KEY': PINECONE_API_KEY, 'PINECONE_HOST_FACTS': PINECONE_HOST_FACTS, 
+        'HUBSPOT_API_KEY': HUBSPOT_API_KEY, 'REDIS_URL': REDIS_URL
     }
     missing_vars = [name for name, value in required_vars.items() if not value]
     raise ValueError(f"Отсутствуют обязательные переменные: {', '.join(missing_vars)}")
 
 # --- КОНФИГУРАЦИЯ КЛИЕНТОВ ---
 genai.configure(api_key=GEMINI_API_KEY)
+# Модель для генерации основных ответов
 generation_model = genai.GenerativeModel('gemini-1.5-flash')
+# Отдельная модель для быстрой классификации запросов
+classification_model = genai.GenerativeModel('gemini-1.5-flash')
 embedding_model = 'models/text-embedding-004'
 
+# Инициализация клиента Redis
 try:
     print("🔍 Инициализируем Redis client...")
     redis_client = redis.from_url(REDIS_URL, decode_responses=True)
     redis_client.ping()
     print("✅ Соединение с Redis инициализировано успешно")
 except Exception as e:
-    print(f"❌ Критическая ошибка инициализации Redis: {e}")
-    raise e
+    raise ValueError(f"❌ Критическая ошибка инициализации Redis: {e}")
 
+# Ленивая инициализация Pinecone
 def get_pinecone_index():
     if not hasattr(get_pinecone_index, 'initialized'):
         try:
             print("🔍 Инициализируем Pinecone client...")
             pc = Pinecone(api_key=PINECONE_API_KEY)
             facts_description = pc.describe_index("ukido")
-            print(f"🔍 Facts индекс host: {facts_description.host}")
-            get_pinecone_index.pc = pc
             get_pinecone_index.index_facts = pc.Index(host=facts_description.host)
             get_pinecone_index.initialized = True
             print("✅ Соединение с Pinecone Facts инициализировано успешно")
         except Exception as e:
-            print(f"❌ Ошибка инициализации Pinecone: {e}")
-            raise e
+            raise RuntimeError(f"❌ Ошибка инициализации Pinecone: {e}")
     return get_pinecone_index.index_facts
 
+# --- УПРАВЛЕНИЕ ПАМЯТЬЮ ДИАЛОГОВ В REDIS ---
 CONVERSATION_MEMORY_SIZE = 9
 CONVERSATION_EXPIRATION_SECONDS = 3600
 
 def get_conversation_history_from_redis(chat_id):
+    """Получает историю диалога из Redis."""
     history_key = f"history:{chat_id}"
     history_list = redis_client.lrange(history_key, 0, -1)
     history_list.reverse()
     return history_list
 
 def update_conversation_history_in_redis(chat_id, user_message, ai_response):
+    """Обновляет историю диалога в Redis."""
     history_key = f"history:{chat_id}"
     pipe = redis_client.pipeline()
     pipe.lpush(history_key, f"Ассистент: {ai_response}")
     pipe.lpush(history_key, f"Пользователь: {user_message}")
-    max_lines = CONVERSATION_MEMORY_SIZE * 2
-    pipe.ltrim(history_key, 0, max_lines - 1)
+    pipe.ltrim(history_key, 0, (CONVERSATION_MEMORY_SIZE * 2) - 1)
     pipe.expire(history_key, CONVERSATION_EXPIRATION_SECONDS)
     pipe.execute()
 
-# --- СИСТЕМА ПРОМПТОВ ---
+
+# --- СИСТЕМА ПРОМПТОВ И СТИЛЕЙ ---
 BASE_PROMPT = """Ты AI-ассистент украинской школы soft skills для детей "Ukido". Отвечай на "вы" с уважением. Обслуживаешь родителей украинских детей среднего класса."""
 STYLE_MODULES = {
-    # Стили остаются без изменений, они работают отлично
     "informational": """МАКСИМУМ 1-2 предложения. Дай ТОЛЬКО факт из контекста четко и коротко.
 Добавь ОДНУ легкую одесскую деталь из вариантов:
 - "Ну что ж, так у нас" 
@@ -165,128 +166,132 @@ STYLE_MODULES = {
 Предлагай конкретную помощь от школы, но деликатно."""
 }
 
-def analyze_request_type(user_message):
-    message_lower = user_message.lower()
-    sensitive_keywords = ['развод', 'развелись', 'смерть', 'умер', 'умерла', 'болезнь', 'болеет', 'депрессия', 'травма', 'горе', 'потеря']
-    if any(word in message_lower for word in sensitive_keywords):
-        return "sensitive"
-    trial_keywords = ['пробный', 'попробовать', 'посмотреть', 'попробуем', 'можно ли попробовать', 'хочу попробовать', 'дайте попробовать', 'хочу попробовать']
-    if any(word in message_lower for word in trial_keywords):
-        return "trial_lesson"
-    info_keywords = ['цена', 'стоимость', 'расписание', 'запись', 'когда', 'сколько', 'время', 'адрес', 'телефон', 'как записаться', 'возраст', 'длительность', 'продолжительность', 'сколько детей', 'размер группы', 'миссия', 'учителя', 'преподаватели', 'методики']
-    if any(word in message_lower for word in info_keywords):
-        return "informational"
-    philosophical_keywords = ['как правильно', 'смысл', 'почему', 'зачем', 'современные дети', 'поколение', 'в наше время', 'раньше было', 'принципы воспитания', 'правильно воспитывать', 'невоспитанные']
-    if any(word in message_lower for word in philosophical_keywords):
-        return "philosophical"
-    return "consultational"
+# --- ЯДРО ЛОГИКИ БОТА ---
 
-def should_add_lesson_link(user_message, request_type, conversation_length):
-    if request_type == "trial_lesson":
-        return True
-    if request_type in ["informational", "sensitive"]:
-        return False
-    return conversation_length >= 18
+def get_request_type_with_gemini(user_message, history_context):
+    """Определяет намерение пользователя с помощью Gemini для более точной логики."""
+    prompt = f"""
+    Проанализируй последний вопрос пользователя и классифицируй его. Учитывай историю диалога для контекста.
 
-# <<< ИЗМЕНЕНИЕ: Полностью переработанная функция для борьбы с "залипанием" >>>
-def create_enriched_prompt(request_type, facts_context, history_context):
+    Категории:
+    - informational: Запрос конкретной информации о школе Ukido (цена, расписание, курсы, учителя, методики, адрес, длительность, партнерства, требования).
+    - trial_lesson: Явный запрос на пробный урок или желание попробовать ("хочу попробовать", "можно ли посмотреть").
+    - sensitive: Запрос на очень деликатную тему (развод, смерть, болезнь, тяжелая депрессия, горе, травма).
+    - consultational: Просьба дать совет по конкретной проблеме с поведением ребенка (не слушается, сидит в телефоне, капризничает, истерики, не общается).
+    - philosophical: Общий, философский вопрос о воспитании, современных детях, смысле чего-либо, сравнение поколений.
+
+    [ИСТОРИЯ ДИАЛОГА]:
+    {history_context if history_context else "Нет истории."}
+
+    [ПОСЛЕДНИЙ ВОПРОС ПОЛЬЗОВАТЕЛЯ]:
+    {user_message}
+
+    Ответь ОДНИМ словом - названием категории из списка выше.
     """
-    Создает обогащенный промпт с четкой иерархией, чтобы предотвратить "залипание" на истории.
-    """
-    # Шаг 1: Определяем базовые инструкции и стиль для текущего запроса.
-    system_prompt = f"""{BASE_PROMPT}
+    try:
+        response = classification_model.generate_content(prompt)
+        request_type = response.text.strip().lower()
+        if request_type in STYLE_MODULES:
+            print(f"🧠 Классификатор Gemini определил тип: {request_type}")
+            return request_type
+        else:
+            print(f"⚠️ Классификатор Gemini вернул невалидное значение: '{request_type}'. Используем 'consultational'.")
+            return "consultational"
+    except Exception as e:
+        print(f"❌ Ошибка классификатора Gemini: {e}. Используем 'consultational'.")
+        return "consultational"
 
-{STYLE_MODULES[request_type]}
-
-ОБЯЗАТЕЛЬНЫЕ ПРАВИЛА:
-- Опирайся ТОЛЬКО на факты из [КОНТЕКСТА из базы фактов].
-- Если в контексте нет ответа, честно признайся, сказав: "К сожалению, у меня нет точной информации по этому вопросу". Не выдумывай.
-- Максимум один смайлик за ответ.
-- НИКОГДА не упоминай реальные имена из литературы.
-- Обращение только на "вы"."""
-
-    # Шаг 2: Собираем финальный промпт с четким порядком приоритетов.
-    final_prompt = f"""{system_prompt}
-
-### КОНТЕКСТ из базы фактов (Источник правды для ответа):
-{facts_context if facts_context else "Нет релевантной информации."}
-
-### ИСТОРИЯ ПРЕДЫДУЩЕГО ДИАЛОГА (Используй только для справки, чтобы понять общий настрой разговора):
-{history_context if history_context else "Это начало диалога."}
-
----
-### ГЛАВНАЯ ЗАДАЧА:
-Твоя основная цель — дать точный и релевантный ответ на **самый последний вопрос пользователя**, который находится ниже. Не позволяй истории диалога отвлечь тебя. Если пользователь спрашивает про цену, отвечай про цену. Если про расписание — отвечай про расписание. Сосредоточься на последнем запросе.
-
-Пользователь:"""
-    
-    return final_prompt
-# <<< КОНЕЦ ИЗМЕНЕНИЯ >>>
-
-def get_facts_context(prompt):
+def get_facts_from_rag(prompt):
+    """Ищет факты в Pinecone ТОЛЬКО для информационных запросов."""
     try:
         index_facts = get_pinecone_index()
-        query_embedding = genai.embed_content(
-            model=embedding_model, 
-            content=prompt, 
-            task_type="RETRIEVAL_QUERY"
-        )['embedding']
+        query_embedding = genai.embed_content(model=embedding_model, content=prompt, task_type="RETRIEVAL_QUERY")['embedding']
         facts_results = index_facts.query(vector=query_embedding, top_k=3, include_metadata=True)
-        # <<< ИЗМЕНЕНИЕ: Добавил проверку на релевантность, чтобы отсечь мусор >>>
-        relevant_matches = [match['metadata']['text'] for match in facts_results['matches'] if match['score'] > 0.7]
+        relevant_matches = [match['metadata']['text'] for match in facts_results['matches'] if match['score'] > 0.75]
+        
         if not relevant_matches:
-            print("⚠️ RAG не нашел достаточно релевантного контекста.")
-            return "", True # Возвращаем пустую строку, чтобы модель знала, что фактов нет
+            print("⚠️ RAG не нашел релевантного контекста.")
+            return ""
         
         facts_context = "\n".join(relevant_matches)
-        print("✅ RAG система работает корректно")
-        return facts_context, True
+        print("✅ RAG нашел релевантный контекст.")
+        return facts_context
     except Exception as e:
-        print(f"⚠️ RAG система временно недоступна: {e}")
-        fallback_facts = """Ukido - онлайн-школа soft skills для детей. 
-Курсы: "Юный Оратор" (7-10 лет), "Эмоциональный Компас" (9-12 лет), "Капитан Проектов" (11-14 лет).
-Стоимость: от 6000 до 8000 грн в месяц. Занятия 2 раза в неделю по 90 минут.
-Доступны бесплатные пробные уроки."""
-        return fallback_facts, False
+        print(f"⚠️ Ошибка RAG системы: {e}")
+        return ""
 
-def get_optimized_gemini_response(chat_id, prompt):
-    request_type = analyze_request_type(prompt)
-    facts_context, rag_available = get_facts_context(prompt)
+def create_enriched_prompt(request_type, facts_context, history_context, user_message):
+    """Создает динамический промпт в зависимости от типа запроса."""
+    base_rules = """ОБЯЗАТЕЛЬНЫЕ ПРАВИЛА:
+- Обращайся только на "вы".
+- Максимум один смайлик за ответ.
+- НИКОГДА не упоминай реальные имена из литературы."""
+
+    if request_type == "informational":
+        specific_instructions = f"""
+        Твоя задача - ответить на вопрос пользователя, используя ТОЛЬКО [КОНТЕКСТ из базы фактов].
+        - Если в контексте есть нужный факт, дай его четко и коротко в стиле informational.
+        - Если в контексте НЕТ ответа, скажи: "К сожалению, у меня нет точной информации по этому вопросу. Что поделаешь?". Не выдумывай и не используй историю.
+        """
+        context_section = f"### КОНТЕКСТ из базы фактов (Единственный источник правды):\n{facts_context if facts_context else 'Нет информации.'}"
+    else:
+        specific_instructions = f"""
+        Твоя задача - дать совет или поразмышлять на тему пользователя в стиле {request_type}.
+        НЕ ищи факты. Опирайся на свой "жизненный опыт" из инструкций по стилю и на историю диалога для поддержания беседы.
+        """
+        context_section = ""
+
+    system_prompt = f"""{BASE_PROMPT}
+{STYLE_MODULES[request_type]}
+{base_rules}
+{specific_instructions}"""
+    
+    return f"""{system_prompt}
+### ИСТОРИЯ ПРЕДЫДУЩЕГО ДИАЛОГА:
+{history_context if history_context else "Это начало диалога."}
+{context_section}
+---
+### ПОСЛЕДНИЙ ВОПРОС ПОЛЬЗОВАТЕЛЯ (Отвечай именно на него):
+{user_message}
+
+Ассистент:"""
+
+def get_optimized_gemini_response(chat_id, user_message):
+    """Главная функция с разделенной логикой для разных типов запросов."""
     history = get_conversation_history_from_redis(chat_id)
     history_context = "\n".join(history)
-    conversation_length = len(history)
     
-    enriched_prompt = create_enriched_prompt(request_type, facts_context, history_context)
-    full_prompt = enriched_prompt + " " + prompt + "\nАссистент:" # Добавил пробел для чистоты
+    request_type = get_request_type_with_gemini(user_message, history_context)
+    
+    facts_context = ""
+    if request_type == "informational":
+        facts_context = get_facts_from_rag(user_message)
+
+    full_prompt = create_enriched_prompt(request_type, facts_context, history_context, user_message)
     
     try:
         response = generation_model.generate_content(full_prompt)
         ai_response = response.text.strip()
         
-        if should_add_lesson_link(prompt, request_type, conversation_length):
-            if "[LESSON_LINK]" not in ai_response and request_type != "trial_lesson":
+        # Добавляем ссылку на урок, если это уместно
+        if request_type != "informational" and request_type != "sensitive" and (request_type == "trial_lesson" or len(history) >= 10):
+             if "[LESSON_LINK]" not in ai_response:
                 ai_response += "\n\n🎯 Хотите увидеть нашу методику в действии? Попробуйте пробный урок: [LESSON_LINK]"
         
         if "[LESSON_LINK]" in ai_response:
             base_url = os.environ.get('BASE_URL')
             lesson_url = f"{base_url}/lesson?user_id={chat_id}" if base_url else f"http://localhost:5000/lesson?user_id={chat_id}"
-            if not base_url:
-                print("⚠️ BASE_URL не настроен, используется localhost fallback")
             ai_response = ai_response.replace("[LESSON_LINK]", lesson_url)
-        
-        update_conversation_history_in_redis(chat_id, prompt, ai_response)
-        
-        print(f"✅ Ответ сгенерирован: тип={request_type}, память={conversation_length//2} обменов, RAG={'да' if rag_available else 'нет'}")
-        
+
+        update_conversation_history_in_redis(chat_id, user_message, ai_response)
         return ai_response
     except Exception as e:
-        print(f"❌ Критическая ошибка при работе с Gemini AI: {e}")
-        return """Извините, в данный момент система испытывает технические трудности. 
+        print(f"❌ Критическая ошибка при генерации ответа Gemini: {e}")
+        return "Извините, у меня возникла внутренняя ошибка. Пожалуйста, попробуйте перефразировать вопрос."
 
-Пожалуйста, попробуйте обратиться позже или свяжитесь с нашими консультантами напрямую."""
-
-# --- HUBSPOT И FLASK (без изменений) ---
+# --- ИНТЕГРАЦИЯ С HUBSPOT И FLASK ---
 def send_to_hubspot(user_data):
+    """Отправляет данные пользователя в HubSpot CRM."""
     hubspot_url = "https://api.hubapi.com/crm/v3/objects/contacts"
     headers = {"Authorization": f"Bearer {HUBSPOT_API_KEY}", "Content-Type": "application/json"}
     contact_data = {"properties": {"firstname": user_data["firstName"], "lastname": user_data["lastName"], "email": user_data["email"], "telegram_user_id": str(user_data.get("userId", ""))}}
@@ -303,14 +308,17 @@ def send_to_hubspot(user_data):
         return False
 
 def generate_first_follow_up_message(first_name):
+    """Генерирует первое автоматическое сообщение."""
     return f"""👋 Привет, {first_name}!\n\nКак впечатления от нашего урока об открытых вопросах? Удалось попробовать технику в реальной жизни?\n\n🎯 Если понравилось, предлагаю записаться на полноценное пробное занятие с тренером Ukido. Это бесплатно и поможет лучше понять нашу методику.\n\nИнтересно?"""
 
 def generate_second_follow_up_message(first_name):
+    """Генерирует второе автоматическое сообщение."""
     return f"""🌟 {first_name}, не хочу быть навязчивым, но очень хочется узнать ваше мнение!\n\nИскусство правильных вопросов действительно может изменить отношения в семье. Многие родители замечают улучшения уже после первых попыток применить технику.\n\n💡 Если готовы погрузиться глубже, наши тренеры покажут еще больше эффективных методов развития soft skills у детей.\n\nЗапишем на бесплатную консультацию?"""
 
 app = Flask(__name__)
 
 def send_telegram_message(chat_id, text):
+    """Отправляет сообщение пользователю в Telegram с ретраями."""
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {"chat_id": chat_id, "text": text}
     max_retries = 3
@@ -327,7 +335,6 @@ def send_telegram_message(chat_id, text):
         except Exception as e:
             print(f"❌ Ошибка при отправке сообщения в Telegram (попытка {attempt + 1}/{max_retries}): {e}")
         if attempt < max_retries - 1:
-            import time
             time.sleep(1)
     print(f"❌ Не удалось отправить сообщение пользователю {chat_id} после {max_retries} попыток")
     return False
@@ -375,7 +382,6 @@ def hubspot_webhook():
                 elif message_type == 'second_follow_up':
                     follow_up_message = generate_second_follow_up_message(first_name)
                 else:
-                    print(f"⚠️ Неизвестный тип сообщения: {message_type}")
                     return "Unknown message type", 400
                 send_telegram_message(telegram_id, follow_up_message)
                 print(f"✅ Follow-up сообщение ({message_type}) отправлено пользователю {telegram_id}")
@@ -383,7 +389,6 @@ def hubspot_webhook():
                 print("❌ Не найден telegram_user_id для контакта")
             return "OK", 200
         else:
-            print("❌ Не удалось извлечь contact_id из webhook данных")
             return "No contact ID found", 400
     except Exception as e:
         print(f"❌ Ошибка обработки webhook: {e}")
@@ -392,9 +397,8 @@ def hubspot_webhook():
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     debug_mode = os.environ.get('DEBUG', 'false').lower() == 'true'
-    print(f"🚀 Запуск ФИНАЛЬНОГО Flask приложения на порту {port}")
+    print(f"🚀 Запуск Flask приложения на порту {port}")
     print(f"🔧 Debug режим: {'включен' if debug_mode else 'отключен'}")
     print("🧠 Память диалогов: 9 обменов (внешняя, в Redis)")
-    print("🎭 Стиль Жванецкого: ОБОГАЩЕННЫЙ, фокус на последнем вопросе")
-    print("📊 Facts RAG: АКТИВЕН, с порогом релевантности")
+    print("🤖 Ядро логики: ПЕРЕРАБОТАНО. Умный классификатор + разделение потоков RAG/Non-RAG.")
     app.run(debug=debug_mode, port=port, host='0.0.0.0')
