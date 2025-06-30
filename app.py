@@ -4,6 +4,7 @@ import google.generativeai as genai
 from flask import Flask, request, render_template
 from dotenv import load_dotenv
 from pinecone import Pinecone
+import redis # <<< ИЗМЕНЕНИЕ: Добавили импорт Redis
 
 # --- НАСТРОЙКИ И ЗАГРУЗКА КЛЮЧЕЙ ---
 load_dotenv()
@@ -13,15 +14,17 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 PINECONE_HOST_FACTS = os.getenv("PINECONE_HOST_FACTS")
 HUBSPOT_API_KEY = os.getenv("HUBSPOT_API_KEY")
+REDIS_URL = os.getenv("REDIS_URL") # <<< ИЗМЕНЕНИЕ: Добавили переменную для Redis
 
-# Проверяем только необходимые переменные (убрали PINECONE_HOST_STYLE)
-if not all([TELEGRAM_BOT_TOKEN, GEMINI_API_KEY, PINECONE_API_KEY, PINECONE_HOST_FACTS, HUBSPOT_API_KEY]):
+# Проверяем переменные, включая Redis
+if not all([TELEGRAM_BOT_TOKEN, GEMINI_API_KEY, PINECONE_API_KEY, PINECONE_HOST_FACTS, HUBSPOT_API_KEY, REDIS_URL]):
     required_vars = {
         'TELEGRAM_BOT_TOKEN': TELEGRAM_BOT_TOKEN,
         'GEMINI_API_KEY': GEMINI_API_KEY, 
         'PINECONE_API_KEY': PINECONE_API_KEY,
         'PINECONE_HOST_FACTS': PINECONE_HOST_FACTS,
-        'HUBSPOT_API_KEY': HUBSPOT_API_KEY
+        'HUBSPOT_API_KEY': HUBSPOT_API_KEY,
+        'REDIS_URL': REDIS_URL # <<< ИЗМЕНЕНИЕ: Добавили в проверку
     }
     missing_vars = [name for name, value in required_vars.items() if not value]
     raise ValueError(f"Отсутствуют обязательные переменные: {', '.join(missing_vars)}")
@@ -31,44 +34,76 @@ genai.configure(api_key=GEMINI_API_KEY)
 generation_model = genai.GenerativeModel('gemini-1.5-flash')
 embedding_model = 'models/text-embedding-004'
 
+# <<< ИЗМЕНЕНИЕ НАЧАЛО: Инициализация клиента Redis >>>
+try:
+    print("🔍 Инициализируем Redis client...")
+    # decode_responses=True чтобы Redis возвращал строки, а не байты
+    redis_client = redis.from_url(REDIS_URL, decode_responses=True)
+    # Проверяем соединение
+    redis_client.ping()
+    print("✅ Соединение с Redis инициализировано успешно")
+except Exception as e:
+    print(f"❌ Критическая ошибка инициализации Redis: {e}")
+    raise e
+# <<< ИЗМЕНЕНИЕ КОНЕЦ >>>
+
 def get_pinecone_index():
     """
-    Ленивая инициализация соединения с Pinecone Facts (убрали Style RAG)
+    Ленивая инициализация соединения с Pinecone Facts
     """
     if not hasattr(get_pinecone_index, 'initialized'):
         try:
             print("🔍 Инициализируем Pinecone client...")
             pc = Pinecone(api_key=PINECONE_API_KEY)
-            
-            # Получаем актуальную информацию только о facts индексе
-            print("🔍 Получаем актуальную информацию об индексе фактов...")
             facts_description = pc.describe_index("ukido")
-            
             print(f"🔍 Facts индекс host: {facts_description.host}")
-            
-            # Создаем подключение только к facts индексу
             get_pinecone_index.pc = pc
             get_pinecone_index.index_facts = pc.Index(host=facts_description.host)
             get_pinecone_index.initialized = True
-            
             print("✅ Соединение с Pinecone Facts инициализировано успешно")
-            
         except Exception as e:
             print(f"❌ Ошибка инициализации Pinecone: {e}")
             raise e
-    
     return get_pinecone_index.index_facts
 
-# --- ПАМЯТЬ ДИАЛОГОВ ---
-conversation_history = {}
-CONVERSATION_MEMORY_SIZE = 9  # Бот помнит и использует 9 обменов (память = контекст)
+# <<< ИЗМЕНЕНИЕ НАЧАЛО: Функции для работы с историей в Redis >>>
+# Глобальная переменная conversation_history УДАЛЕНА
+CONVERSATION_MEMORY_SIZE = 9  # Бот помнит 9 обменов
+CONVERSATION_EXPIRATION_SECONDS = 3600 # Хранить историю диалога 1 час
+
+def get_conversation_history_from_redis(chat_id):
+    """Получает историю диалога из Redis."""
+    history_key = f"history:{chat_id}"
+    # lrange получает все элементы списка. Они хранятся в обратном порядке, поэтому переворачиваем.
+    history_list = redis_client.lrange(history_key, 0, -1)
+    history_list.reverse()
+    return history_list
+
+def update_conversation_history_in_redis(chat_id, user_message, ai_response):
+    """Обновляет историю диалога в Redis для конкретного пользователя."""
+    history_key = f"history:{chat_id}"
+    
+    # Используем pipeline для выполнения нескольких команд за один запрос (эффективнее)
+    pipe = redis_client.pipeline()
+    # Добавляем в начало списка (lpush)
+    pipe.lpush(history_key, f"Ассистент: {ai_response}")
+    pipe.lpush(history_key, f"Пользователь: {user_message}")
+    
+    # Обрезаем список, чтобы он не превышал заданный размер
+    max_lines = CONVERSATION_MEMORY_SIZE * 2
+    pipe.ltrim(history_key, 0, max_lines - 1)
+    
+    # Устанавливаем время жизни для ключа, чтобы старые диалоги автоматически удалялись
+    pipe.expire(history_key, CONVERSATION_EXPIRATION_SECONDS)
+    
+    pipe.execute()
+# <<< ИЗМЕНЕНИЕ КОНЕЦ >>>
+
 
 # --- ОБОГАЩЕННАЯ СИСТЕМА ПРОМПТОВ СО СТИЛЕМ ЖВАНЕЦКОГО ---
-
-# Базовый промпт
+# ... (весь ваш блок STYLE_MODULES и другие функции остаются без изменений) ...
+# ... (analyze_request_type, should_add_lesson_link, create_enriched_prompt, get_facts_context) ...
 BASE_PROMPT = """Ты AI-ассистент украинской школы soft skills для детей "Ukido". Отвечай на "вы" с уважением. Обслуживаешь родителей украинских детей среднего класса."""
-
-# Обогащенные стилевые модули с ярким стилем Жванецкого
 STYLE_MODULES = {
     "informational": """МАКСИМУМ 1-2 предложения. Дай ТОЛЬКО факт из контекста четко и коротко.
 Добавь ОДНУ легкую одесскую деталь из вариантов:
@@ -156,60 +191,30 @@ STYLE_MODULES = {
 НИКОГДА не используй: "А что тут поделаешь", "Ну что ж", звукоподражания.
 Предлагай конкретную помощь от школы, но деликатно."""
 }
-
 def analyze_request_type(user_message):
-    """
-    Улучшенный анализатор типа запроса с проверкой sensitive тем
-    """
     message_lower = user_message.lower()
-    
-    # ПЕРВЫЙ ПРИОРИТЕТ: Деликатные темы
     sensitive_keywords = ['развод', 'развелись', 'смерть', 'умер', 'умерла', 'болезнь', 'болеет', 'депрессия', 'травма', 'горе', 'потеря']
     if any(word in message_lower for word in sensitive_keywords):
         return "sensitive"
-    
-    # ВТОРОЙ ПРИОРИТЕТ: Запросы на пробный урок  
     trial_keywords = ['пробный', 'попробовать', 'посмотреть', 'попробуем', 'можно ли попробовать', 'хочу попробовать', 'дайте попробовать', 'хочу попробовать']
     if any(word in message_lower for word in trial_keywords):
         return "trial_lesson"
-    
-    # ТРЕТИЙ ПРИОРИТЕТ: Информационные запросы
     info_keywords = ['цена', 'стоимость', 'расписание', 'запись', 'когда', 'сколько', 'время', 'адрес', 'телефон', 'как записаться', 'возраст', 'длительность', 'продолжительность', 'сколько детей', 'размер группы']
     if any(word in message_lower for word in info_keywords):
         return "informational"
-    
-    # ЧЕТВЕРТЫЙ ПРИОРИТЕТ: Философские вопросы
     philosophical_keywords = ['как правильно', 'смысл', 'почему', 'зачем', 'современные дети', 'поколение', 'в наше время', 'раньше было', 'принципы воспитания', 'правильно воспитывать', 'невоспитанные']
     if any(word in message_lower for word in philosophical_keywords):
         return "philosophical"
-    
-    # ПО УМОЛЧАНИЮ: Консультационные (проблемы с детьми)
     return "consultational"
-
 def should_add_lesson_link(user_message, request_type, conversation_length):
-    """
-    Логика добавления ссылки на урок
-    """
-    # Всегда добавляем для trial_lesson запросов
     if request_type == "trial_lesson":
         return True
-    
-    # Не добавляем для информационных запросов
     if request_type == "informational":
         return False
-    
-    # НИКОГДА не добавляем для деликатных тем
     if request_type == "sensitive":
         return False
-    
-    # Добавляем для консультаций/философии после 9+ обменов (18 строк)
-    return conversation_length >= 18  # 9 обменов = 18 строк
-
+    return conversation_length >= 18
 def create_enriched_prompt(request_type, facts_context, history_context):
-    """
-    Создает обогащенный промпт с ярким стилем Жванецкого
-    """
-    # Базовый промпт + обогащенный стилевой модуль + правила
     system_prompt = f"""{BASE_PROMPT}
 
 {STYLE_MODULES[request_type]}
@@ -230,82 +235,49 @@ def create_enriched_prompt(request_type, facts_context, history_context):
 {facts_context}
 
 Пользователь: """
-
 def get_facts_context(prompt):
-    """
-    Получает релевантный контекст только из базы фактов
-    """
     try:
         index_facts = get_pinecone_index()
-        
-        # Создаем эмбеддинг для поискового запроса
         query_embedding = genai.embed_content(
             model=embedding_model, 
             content=prompt, 
             task_type="RETRIEVAL_QUERY"
         )['embedding']
-        
-        # Ищем релевантные факты о школе (топ-3 результата)
         facts_results = index_facts.query(vector=query_embedding, top_k=3, include_metadata=True)
         facts_context = "\n".join([match['metadata']['text'] for match in facts_results['matches']])
-        
         print("✅ RAG система работает корректно")
         return facts_context, True
-        
     except Exception as e:
         print(f"⚠️ RAG система временно недоступна: {e}")
-        
-        # Fallback: базовая информация о школе
         fallback_facts = """Ukido - онлайн-школа soft skills для детей. 
 Курсы: "Юный Оратор" (7-10 лет), "Эмоциональный Компас" (9-12 лет), "Капитан Проектов" (11-14 лет).
 Стоимость: от 6000 до 8000 грн в месяц. Занятия 2 раза в неделю по 90 минут.
 Доступны бесплатные пробные уроки."""
-        
         return fallback_facts, False
-
-def update_conversation_history(chat_id, user_message, ai_response):
-    """Обновляет историю диалога для конкретного пользователя"""
-    if chat_id not in conversation_history:
-        conversation_history[chat_id] = []
-    
-    conversation_history[chat_id].append(f"Пользователь: {user_message}")
-    conversation_history[chat_id].append(f"Ассистент: {ai_response}")
-    
-    # Ограничиваем размер истории (9 обменов = 18 строк)
-    max_lines = CONVERSATION_MEMORY_SIZE * 2
-    if len(conversation_history[chat_id]) > max_lines:
-        conversation_history[chat_id] = conversation_history[chat_id][-max_lines:]
 
 def get_optimized_gemini_response(chat_id, prompt):
     """
-    ФИНАЛЬНАЯ главная функция с честной памятью: что помним - то используем
+    ФИНАЛЬНАЯ главная функция, использующая Redis для хранения истории.
     """
-    # Определяем тип запроса
     request_type = analyze_request_type(prompt)
-    
-    # Получаем контекст только из фактов
     facts_context, rag_available = get_facts_context(prompt)
     
-    # Получаем ВСЮ историю диалога - используем всю память (9 обменов = 18 строк)
-    history = conversation_history.get(chat_id, [])
-    history_context = "\n".join(history)  # ВСЯ память в контекст
+    # <<< ИЗМЕНЕНИЕ: Получаем историю из Redis, а не из глобальной переменной >>>
+    history = get_conversation_history_from_redis(chat_id)
+    history_context = "\n".join(history)
     conversation_length = len(history)
     
-    # Создаем обогащенный промпт
     enriched_prompt = create_enriched_prompt(request_type, facts_context, history_context)
     full_prompt = enriched_prompt + prompt + "\nАссистент:"
     
     try:
-        # Генерируем ответ
         response = generation_model.generate_content(full_prompt)
         ai_response = response.text.strip()
         
-        # Добавляем ссылку на урок если нужно
         if should_add_lesson_link(prompt, request_type, conversation_length):
             if "[LESSON_LINK]" not in ai_response and request_type != "trial_lesson":
                 ai_response += "\n\n🎯 Хотите увидеть нашу методику в действии? Попробуйте пробный урок: [LESSON_LINK]"
         
-        # Обрабатываем ссылку на урок
         if "[LESSON_LINK]" in ai_response:
             base_url = os.environ.get('BASE_URL')
             if base_url:
@@ -313,11 +285,10 @@ def get_optimized_gemini_response(chat_id, prompt):
             else:
                 lesson_url = f"http://localhost:5000/lesson?user_id={chat_id}"
                 print("⚠️ BASE_URL не настроен, используется localhost fallback")
-            
             ai_response = ai_response.replace("[LESSON_LINK]", lesson_url)
         
-        # Сохраняем в истории диалога
-        update_conversation_history(chat_id, prompt, ai_response)
+        # <<< ИЗМЕНЕНИЕ: Сохраняем историю в Redis >>>
+        update_conversation_history_in_redis(chat_id, prompt, ai_response)
         
         print(f"✅ Ответ сгенерирован: тип={request_type}, память={conversation_length//2} обменов, RAG={'да' if rag_available else 'нет'}")
         
@@ -329,7 +300,7 @@ def get_optimized_gemini_response(chat_id, prompt):
 
 Пожалуйста, попробуйте обратиться позже или свяжитесь с нашими консультантами напрямую."""
 
-# --- HUBSPOT ИНТЕГРАЦИЯ ---
+# ... (весь ваш код для HubSpot и Flask остается без изменений) ...
 def send_to_hubspot(user_data):
     """Отправляет данные пользователя в HubSpot CRM"""
     hubspot_url = "https://api.hubapi.com/crm/v3/objects/contacts"
@@ -362,7 +333,6 @@ def send_to_hubspot(user_data):
     except Exception as e:
         print(f"❌ Ошибка при отправке в HubSpot: {str(e)}")
         return False
-
 def generate_first_follow_up_message(first_name):
     """Генерирует первое автоматическое сообщение"""
     return f"""👋 Привет, {first_name}!
@@ -372,7 +342,6 @@ def generate_first_follow_up_message(first_name):
 🎯 Если понравилось, предлагаю записаться на полноценное пробное занятие с тренером Ukido. Это бесплатно и поможет лучше понять нашу методику.
 
 Интересно?"""
-
 def generate_second_follow_up_message(first_name):
     """Генерирует второе автоматическое сообщение"""
     return f"""🌟 {first_name}, не хочу быть навязчивым, но очень хочется узнать ваше мнение!
@@ -382,10 +351,7 @@ def generate_second_follow_up_message(first_name):
 💡 Если готовы погрузиться глубже, наши тренеры покажут еще больше эффективных методов развития soft skills у детей.
 
 Запишем на бесплатную консультацию?"""
-
-# --- ОСНОВНОЕ ПРИЛОЖЕНИЕ FLASK ---
 app = Flask(__name__)
-
 def send_telegram_message(chat_id, text):
     """Отправляет сообщение пользователю в Telegram"""
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -413,15 +379,11 @@ def send_telegram_message(chat_id, text):
     
     print(f"❌ Не удалось отправить сообщение пользователю {chat_id} после {max_retries} попыток")
     return False
-
-# --- МАРШРУТЫ FLASK ---
-
 @app.route('/lesson')
 def show_lesson_page():
     """Отображает страницу урока с возможностью персонализации"""
     user_id = request.args.get('user_id')
     return render_template('lesson.html', user_id=user_id)
-
 @app.route('/', methods=['POST'])
 def webhook():
     """Главный маршрут для обработки сообщений от Telegram"""
@@ -436,7 +398,6 @@ def webhook():
         send_telegram_message(chat_id, ai_response)
 
     return "ok", 200
-
 @app.route('/submit-lesson-form', methods=['POST'])
 def submit_lesson_form():
     """Обрабатывает данные формы урока и сохраняет их в HubSpot CRM"""
@@ -456,7 +417,6 @@ def submit_lesson_form():
     else:
         print("⚠️ Не удалось сохранить в CRM, но форма обработана")
         return {"success": True, "message": "Данные получены"}, 200
-
 @app.route('/hubspot-webhook', methods=['POST'])
 def hubspot_webhook():
     """Обрабатывает webhook'и от HubSpot для автоматических сообщений"""
@@ -501,7 +461,6 @@ def hubspot_webhook():
         print(f"❌ Ошибка обработки webhook: {e}")
         return "Error", 500
 
-# --- ТОЧКА ВХОДА В ПРОГРАММУ ---
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     debug_mode = os.environ.get('DEBUG', 'false').lower() == 'true'
@@ -509,7 +468,7 @@ if __name__ == '__main__':
     print(f"🚀 Запуск ФИНАЛЬНОГО Flask приложения на порту {port}")
     print(f"🔧 Debug режим: {'включен' if debug_mode else 'отключен'}")
     print("💰 Токен-экономика: СБАЛАНСИРОВАННАЯ (качество + эффективность)")
-    print("🧠 Память диалогов: 9 обменов (память = контекст)")
+    print("🧠 Память диалогов: 9 обменов (внешняя, в Redis)") # <<< ИЗМЕНЕНИЕ: Уточнили про память
     print("🎭 Стиль Жванецкого: ОБОГАЩЕННЫЙ")
     print("📊 Facts RAG: АКТИВЕН")
     
