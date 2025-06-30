@@ -380,7 +380,7 @@ def webhook():
         received_text = update["message"]["text"]
         
         # Генерируем ответ AI и отправляем пользователю
-        ai_response = get_gemini_response(chat_id, received_text)
+        ai_response = get_enhanced_gemini_response(chat_id, received_text)
         send_telegram_message(chat_id, ai_response)
 
     return "ok", 200
