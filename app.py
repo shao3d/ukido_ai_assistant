@@ -359,6 +359,13 @@ TEST_QUESTIONS = [
     "Подведем итог - что вы бы порекомендовали для ребенка 8 лет?"
 ]
 
+# --- ГЛОБАЛЬНОЕ ХРАНЕНИЕ РЕЗУЛЬТАТОВ ТЕСТИРОВАНИЯ ---
+latest_test_results = {
+    "timestamp": None,
+    "tests": [],
+    "summary": {}
+}
+
 # --- HUBSPOT ИНТЕГРАЦИЯ ---
 def send_to_hubspot(user_data):
     """Отправляет данные пользователя в HubSpot CRM"""
@@ -472,6 +479,8 @@ def webhook():
 @app.route('/test-rag')
 def test_rag_system():
     """НАКОПИТЕЛЬНОЕ ТЕСТИРОВАНИЕ RAG СИСТЕМЫ"""
+    global latest_test_results
+    
     print("\n" + "="*60)
     print("🧪 НАЧАЛО НАКОПИТЕЛЬНОГО ТЕСТИРОВАНИЯ RAG СИСТЕМЫ")
     print("="*60)
@@ -491,6 +500,13 @@ def test_rag_system():
     
     total_test_start = time.time()
     
+    # Инициализируем структуру для сохранения результатов
+    latest_test_results = {
+        "timestamp": datetime.now().isoformat(),
+        "tests": [],
+        "summary": {}
+    }
+    
     for i, question in enumerate(TEST_QUESTIONS, 1):
         print(f"\n🧪 === RAG ТЕСТ №{i}/15 ===")
         print(f"❓ ВОПРОС: {question}")
@@ -500,6 +516,20 @@ def test_rag_system():
         
         # Детальное логирование для анализа
         rag_metrics = metrics.get('rag_metrics', {})
+        
+        # Сохраняем результат для веб-доступа
+        test_result = {
+            "question_number": i,
+            "question": question,
+            "response": response,
+            "metrics": metrics,
+            "rag_success": rag_metrics.get('success', False),
+            "search_time": rag_metrics.get('search_time', 0),
+            "chunks_found": rag_metrics.get('chunks_found', 0),
+            "best_score": rag_metrics.get('best_score', 0),
+            "relevance_desc": rag_metrics.get('relevance_desc', 'Неизвестно')
+        }
+        latest_test_results["tests"].append(test_result)
         
         if rag_metrics.get('success', False):
             print(f"\n🔍 ПОИСК В PINECONE:")
@@ -528,21 +558,122 @@ def test_rag_system():
     
     total_test_time = time.time() - total_test_start
     
+    # Сохраняем итоговую статистику
+    latest_test_results["summary"] = {
+        "total_time": round(total_test_time, 2),
+        "avg_time_per_question": round(total_test_time/15, 2),
+        "redis_status": "available" if redis_available else "unavailable",
+        "pinecone_status": "available" if pinecone_available else "unavailable",
+        "questions_tested": len(TEST_QUESTIONS)
+    }
+    
     print(f"\n🎉 ТЕСТИРОВАНИЕ ЗАВЕРШЕНО!")
     print(f"⏱️  Общее время тестирования: {total_test_time:.1f} секунд")
     print(f"📊 Среднее время на вопрос: {total_test_time/15:.1f} секунд")
     print(f"💾 Система памяти: {'Redis' if redis_available else 'Fallback'}")
     print(f"🔍 RAG система: {'Pinecone' if pinecone_available else 'Fallback'}")
-    print("\n📋 Скопируйте весь лог выше для анализа качества RAG grounding!")
+    print("\n📋 Результаты доступны по ссылкам:")
+    print("   🌐 HTML: /test-results")
+    print("   📄 JSON: /test-results-json")
     print("="*60)
     
     return {
         "message": "Накопительное тестирование RAG завершено",
-        "questions_tested": len(TEST_QUESTIONS),
-        "total_time": round(total_test_time, 2),
-        "redis_status": "available" if redis_available else "unavailable",
-        "pinecone_status": "available" if pinecone_available else "unavailable"
+        "results_available_at": {
+            "html": "/test-results",
+            "json": "/test-results-json"
+        },
+        **latest_test_results["summary"]
     }, 200
+
+@app.route('/test-results')
+def show_test_results():
+    """Отображает результаты тестирования в удобном HTML формате"""
+    if not latest_test_results["tests"]:
+        return "<h1>Тестирование еще не проводилось</h1><p>Запустите <a href='/test-rag'>/test-rag</a> сначала</p>"
+    
+    # Вычисляем CSS классы заранее
+    redis_status_class = "good" if latest_test_results['summary']['redis_status'] == 'available' else 'error'
+    pinecone_status_class = "good" if latest_test_results['summary']['pinecone_status'] == 'available' else 'error'
+    
+    html = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Результаты тестирования RAG системы Ukido</title>
+        <style>
+            body {{ font-family: Arial, sans-serif; margin: 20px; line-height: 1.6; }}
+            .test {{ border: 1px solid #ddd; margin: 20px 0; padding: 15px; border-radius: 8px; }}
+            .question {{ font-weight: bold; color: #2c3e50; margin-bottom: 10px; }}
+            .response {{ background: #f8f9fa; padding: 10px; border-radius: 4px; margin: 10px 0; }}
+            .metrics {{ font-size: 0.9em; color: #666; }}
+            .good {{ color: #27ae60; }}
+            .warning {{ color: #f39c12; }}
+            .error {{ color: #e74c3c; }}
+            .summary {{ background: #e8f5e9; padding: 15px; border-radius: 8px; margin-bottom: 20px; }}
+        </style>
+    </head>
+    <body>
+        <h1>🧪 Результаты тестирования RAG системы Ukido</h1>
+        
+        <div class="summary">
+            <h2>📊 Общая статистика</h2>
+            <p><strong>Время тестирования:</strong> {latest_test_results['timestamp']}</p>
+            <p><strong>Всего вопросов:</strong> {latest_test_results['summary']['questions_tested']}</p>
+            <p><strong>Общее время:</strong> {latest_test_results['summary']['total_time']} сек</p>
+            <p><strong>Среднее время на вопрос:</strong> {latest_test_results['summary']['avg_time_per_question']} сек</p>
+            <p><strong>Redis:</strong> <span class="{redis_status_class}">{latest_test_results['summary']['redis_status']}</span></p>
+            <p><strong>Pinecone:</strong> <span class="{pinecone_status_class}">{latest_test_results['summary']['pinecone_status']}</span></p>
+        </div>
+    """
+    
+    for test in latest_test_results["tests"]:
+        status_class = "good" if test["rag_success"] else "error"
+        html += f"""
+        <div class="test">
+            <div class="question">❓ Вопрос №{test['question_number']}: {test['question']}</div>
+            
+            <div class="metrics">
+                <strong>🔍 RAG поиск:</strong> 
+                <span class="{status_class}">{'✅ Успешно' if test['rag_success'] else '❌ Ошибка'}</span> | 
+                Время: {test['search_time']}с | 
+                Чанков: {test['chunks_found']} | 
+                Score: {test['best_score']} ({test['relevance_desc']})
+            </div>
+            
+            <div class="response">
+                <strong>🤖 Ответ Gemini:</strong><br>
+                {test['response'].replace('\n', '<br>')}
+            </div>
+            
+            <div class="metrics">
+                <strong>⏱️ Общее время:</strong> {test['metrics']['total_time']}с | 
+                <strong>💾 История:</strong> {test['metrics']['history_length']} строк
+            </div>
+        </div>
+        """
+    
+    html += """
+        <div style="margin-top: 30px; padding: 15px; background: #f0f0f0; border-radius: 8px;">
+            <h3>📋 Как скопировать результаты:</h3>
+            <p>1. Выделите весь текст на странице (Ctrl+A)</p>
+            <p>2. Скопируйте (Ctrl+C)</p>
+            <p>3. Вставьте в текстовый документ</p>
+            <p>Или используйте <a href="/test-results-json">JSON формат</a> для программного анализа</p>
+        </div>
+    </body>
+    </html>
+    """
+    
+    return html
+
+@app.route('/test-results-json')
+def get_test_results_json():
+    """Возвращает результаты тестирования в JSON формате"""
+    if not latest_test_results["tests"]:
+        return {"error": "Тестирование еще не проводилось", "hint": "Запустите /test-rag сначала"}, 404
+    
+    return latest_test_results, 200
 
 @app.route('/submit-lesson-form', methods=['POST'])
 def submit_lesson_form():
