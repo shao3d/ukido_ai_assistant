@@ -230,12 +230,20 @@ def get_facts_from_rag(user_message):
         
         # Собираем контекст и метрики
         context_chunks = []
+        found_chunks_debug = []  # НОВОЕ для диагностики
         best_score = 0
         
         for match in results['matches']:
-            if match['score'] > 0.5:  # Фильтруем слабые совпадения
+            if match['score'] > 0.5:
                 context_chunks.append(match['metadata']['text'])
                 best_score = max(best_score, match['score'])
+                
+                # НОВОЕ - сохраняем для диагностики
+                found_chunks_debug.append({
+                    "score": round(match['score'], 3),
+                    "source": match['metadata'].get('source', 'unknown'),
+                    "text_preview": match['metadata']['text'][:150] + "..."
+                })
         
         context = "\n".join(context_chunks)
         total_time = time.time() - search_start
@@ -245,6 +253,7 @@ def get_facts_from_rag(user_message):
             "embedding_time": round(embedding_time, 2),
             "query_time": round(query_time, 2),
             "chunks_found": len(context_chunks),
+            "found_chunks_debug": found_chunks_debug,  # НОВОЕ!
             "best_score": round(best_score, 3),
             "relevance_desc": get_relevance_description(best_score),
             "speed_desc": get_speed_description(total_time),
