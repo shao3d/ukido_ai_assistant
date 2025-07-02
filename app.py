@@ -216,7 +216,7 @@ def call_deepseek_model(messages_list):
                 "X-Title": "Ukido AI Assistant"
             },
             json={
-                "model": "deepseek/deepseek-v3",
+                "model": "deepseek/deepseek-chat",
                 "messages": messages_list  # <--- КЛЮЧЕВОЕ ИЗМЕНЕНИЕ
             },
             timeout=30
