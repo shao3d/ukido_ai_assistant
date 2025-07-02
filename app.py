@@ -14,6 +14,7 @@ load_dotenv()
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 PINECONE_HOST_FACTS = os.getenv("PINECONE_HOST_FACTS")
 HUBSPOT_API_KEY = os.getenv("HUBSPOT_API_KEY")
@@ -201,34 +202,24 @@ def get_facts_from_rag(user_message):
         metrics = {"search_time": round(total_time, 2), "error": str(e), "fallback_used": True, "chunks_found": 1, "success": False}
         return fallback_context, metrics
 
-# --- НОВАЯ ФУНКЦИЯ ДЛЯ ВЫЗОВА DEEPSEEK (ФИНАЛЬНАЯ ВЕРСИЯ) ---
-def call_deepseek_model(messages_list):
-    """Вызывает модель DeepSeek через OpenRouter API с правильной структурой messages."""
-    base_url = os.environ.get('BASE_URL', 'https://ukidoaiassistant-production.up.railway.app')
-
+# --- ФУНКЦИЯ ДЛЯ ВЫЗОВА MISTRAL ЧЕРЕЗ OPENROUTER ---
+def call_mistral(prompt):
     try:
         response = requests.post(
-            url="https://openrouter.ai/api/v1/chat/completions",
+            "https://openrouter.ai/api/v1/chat/completions",
             headers={
                 "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                "Content-Type": "application/json",
-                "HTTP-Referer": base_url,
-                "X-Title": "Ukido AI Assistant"
+                "Content-Type": "application/json"
             },
             json={
-                "model": "deepseek/deepseek-chat",
-                "messages": messages_list  # <--- КЛЮЧЕВОЕ ИЗМЕНЕНИЕ
-            },
-            timeout=30
+                "model": "mistralai/mistral-neko-instruct",
+                "messages": [{"role": "user", "content": prompt}]
+            }
         )
-        response.raise_for_status()
-        return response.json()["choices"][0]["message"]["content"].strip()
+        return response.json()["choices"][0]["message"]["content"]
     except Exception as e:
-        print(f"❌ Ошибка вызова DeepSeek API: {e}")
-        # Добавляем детализацию ошибки для логов
-        if hasattr(e, 'response') and e.response is not None:
-            print(f"   Ответ сервера: {e.response.text}")
-        return "Извините, у нас временные трудности с AI. Пожалуйста, попробуйте позже."
+        print(f"Ошибка Mistral: {e}")
+        return "Извините, временная проблема с генерацией ответа."
 
 # --- ОСНОВНАЯ ФУНКЦИЯ ГЕНЕРАЦИИ ОТВЕТОВ (ФИНАЛЬНАЯ ВЕРСИЯ) ---
 def generate_response(chat_id, user_message, is_test_mode=False):
@@ -237,48 +228,32 @@ def generate_response(chat_id, user_message, is_test_mode=False):
     facts_context, rag_metrics = get_facts_from_rag(user_message)
     history_list = get_conversation_history(chat_id)
 
-    # --- СБОРКА МАССИВА MESSAGES ---
-    messages = []
-    
-    # 1. Системный промпт
-    messages.append({"role": "system", "content": BASE_PROMPT})
-    
-    # 2. История диалога (если есть)
-    for line in history_list:
-        if line.startswith("Пользователь:"):
-            messages.append({"role": "user", "content": line.replace("Пользователь: ", "", 1)})
-        elif line.startswith("Ассистент:"):
-            messages.append({"role": "assistant", "content": line.replace("Ассистент: ", "", 1)})
-            
-    # 3. Финальный промпт от пользователя с контекстом
-    user_final_prompt = f"Контекст из базы знаний:\n---\n{facts_context}\n---\n\nВопрос пользователя: {user_message}"
-    messages.append({"role": "user", "content": user_final_prompt})
+    # --- Формируем полный промпт для Mistral ---
+    history_context = "\n".join(history_list) if history_list else "Это начало диалога."
+    full_prompt = f"{BASE_PROMPT}\n\nИстория диалога:\n{history_context}\n\nИнформация о школе Ukido:\n{facts_context}\n\nПользователь: {user_message}\nАссистент:"
 
     try:
         llm_start = time.time()
-        # Вызываем модель с ПРАВИЛЬНОЙ структурой
-        ai_response = call_deepseek_model(messages)
+        ai_response = call_mistral(full_prompt)
         llm_time = time.time() - llm_start
-        
-        # Call-to-action (логика остается)
+
         if not is_test_mode and len(history_list) >= 10 and "пробный" not in ai_response.lower():
             base_url = os.environ.get('BASE_URL', 'http://localhost:5000')
             lesson_url = f"{base_url}/lesson?user_id={chat_id}"
             ai_response += f"\n\n🎯 Хотите увидеть нашу методику в действии? Попробуйте пробный урок: {lesson_url}"
-        
-        # Обновление истории (логика остается)
+
         if not is_test_mode:
             update_conversation_history(chat_id, user_message, ai_response)
-        
+
         total_time = time.time() - start_time
-        
+
         response_metrics = {
             "total_time": round(total_time, 2), "llm_time": round(llm_time, 2),
             "rag_metrics": rag_metrics, "history_length": len(history_list),
             "redis_available": redis_available, "pinecone_available": pinecone_available
         }
         return ai_response, response_metrics
-        
+
     except Exception as e:
         print(f"❌ Критическая ошибка в generate_response: {e}")
         error_response = "Извините, возникла техническая проблема. Пожалуйста, попробуйте перефразировать вопрос."
