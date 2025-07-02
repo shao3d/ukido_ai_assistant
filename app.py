@@ -452,3 +452,4 @@ if __name__ == '__main__':
     debug_mode = os.environ.get('DEBUG', 'false').lower() == 'true'
     print("="*60 + f"\n🚀 ЗАПУСК UKIDO AI ASSISTANT С DEEPSEEK\n" + "="*60)
     app.run(debug=debug_mode, port=port, host='0.0.0.0')
+    # Код дл  khj kjhk jhkjh k
