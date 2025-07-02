@@ -202,7 +202,7 @@ def get_facts_from_rag(user_message):
         metrics = {"search_time": round(total_time, 2), "error": str(e), "fallback_used": True, "chunks_found": 1, "success": False}
         return fallback_context, metrics
 
-# --- ФУНКЦИЯ ДЛЯ ВЫЗОВА MISTRAL ЧЕРЕЗ OPENROUTER ---
+# --- ФУНКЦИЯ ДЛЯ ВЫЗОВА MISTRAL ЧЕРЕЗ OPENROUTER (С ОТЛАДКОЙ) ---
 def call_mistral(prompt):
     try:
         response = requests.post(
@@ -212,10 +212,11 @@ def call_mistral(prompt):
                 "Content-Type": "application/json"
             },
             json={
-                "model": "mistralai/mistral-neko-instruct",
+                "model": "mistralai/mistral-neko-instruct", 
                 "messages": [{"role": "user", "content": prompt}]
             }
         )
+        print(f"OpenRouter response: {response.json()}")  # ОТЛАДКА
         return response.json()["choices"][0]["message"]["content"]
     except Exception as e:
         print(f"Ошибка Mistral: {e}")
