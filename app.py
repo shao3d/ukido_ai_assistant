@@ -210,8 +210,8 @@ def get_facts_from_rag(user_message):
         metrics = {"search_time": round(total_time, 2), "error": str(e), "fallback_used": True, "chunks_found": 1, "success": False}
         return fallback_context, metrics
 
-# --- ФУНКЦИЯ ДЛЯ ВЫЗОВА DEEPSEEK ЧЕРЕЗ OPENROUTER ---
-def call_deepseek(prompt):
+# --- ФУНКЦИЯ ДЛЯ ВЫЗОВА GPT-4o MINI ЧЕРЕЗ OPENROUTER ---
+def call_gpt4o_mini(prompt):
     try:
         response = requests.post(
             "https://openrouter.ai/api/v1/chat/completions",
@@ -220,13 +220,13 @@ def call_deepseek(prompt):
                 "Content-Type": "application/json"
             },
             json={
-                "model": "deepseek/deepseek-chat",
+                "model": "gpt-4o-mini",
                 "messages": [{"role": "user", "content": prompt}]
             }
         )
         return response.json()["choices"][0]["message"]["content"]
     except Exception as e:
-        print(f"Ошибка DeepSeek: {e}")
+        print(f"Ошибка GPT-4o Mini: {e}")
         return "Извините, временная проблема с генерацией ответа."
 
 # --- ОСНОВНАЯ ФУНКЦИЯ ГЕНЕРАЦИИ ОТВЕТОВ (ФИНАЛЬНАЯ ВЕРСИЯ) ---
@@ -236,13 +236,13 @@ def generate_response(chat_id, user_message, is_test_mode=False):
     facts_context, rag_metrics = get_facts_from_rag(user_message)
     history_list = get_conversation_history(chat_id)
 
-    # --- Формируем полный промпт для DeepSeek ---
+    # --- Формируем полный промпт для GPT-4o Mini ---
     history_context = "\n".join(history_list) if history_list else "Это начало диалога."
     full_prompt = f"{BASE_PROMPT}\n\nИстория диалога:\n{history_context}\n\nИнформация о школе Ukido:\n{facts_context}\n\nПользователь: {user_message}\nАссистент:"
 
     try:
         llm_start = time.time()
-        ai_response = call_deepseek(full_prompt)
+        ai_response = call_gpt4o_mini(full_prompt)
         llm_time = time.time() - llm_start
 
         if not is_test_mode and len(history_list) >= 10 and "пробный" not in ai_response.lower():
@@ -438,7 +438,7 @@ def test_conversation_system():
         
         start_time = time.time()
         llm_start = time.time()
-        response = call_deepseek(full_prompt)
+        response = call_gpt4o_mini(full_prompt)
         llm_time = time.time() - llm_start
         total_time = time.time() - start_time
         
@@ -562,7 +562,7 @@ def get_conversation_results_json():
 @app.route('/test-rag')
 def test_rag_system():
     global latest_test_results
-    print("\n" + "="*60 + "\n🧪 НАЧАЛО ТЕСТИРОВАНИЯ С DEEPSEEK\n" + "="*60)
+    print("\n" + "="*60 + "\n🧪 НАЧАЛО ТЕСТИРОВАНИЯ С GPT-4o MINI\n" + "="*60)
     test_chat_id = "test_user_session"
     if redis_available:
         try:
@@ -574,7 +574,7 @@ def test_rag_system():
     latest_test_results = {"timestamp": datetime.now().isoformat(), "tests": [], "summary": {}}
     
     for i, question in enumerate(TEST_QUESTIONS, 1):
-        print(f"\n🧪 === ТЕСТ №{i}/25 С DEEPSEEK ===")
+        print(f"\n🧪 === ТЕСТ №{i}/25 С GPT-4o MINI ===")
         print(f"❓ ВОПРОС: {question}")
         response, metrics = generate_response(test_chat_id, question, is_test_mode=True)
         rag_metrics = metrics.get('rag_metrics', {})
@@ -593,7 +593,7 @@ def test_rag_system():
         else:
             print(f"⚠️ ПРОБЛЕМА С PINECONE: {rag_metrics.get('error', 'Неизвестная ошибка')}")
         
-        print(f"🤖 ОТВЕТ DEEPSEEK: {response}")
+        print(f"🤖 ОТВЕТ GPT-4o MINI: {response}")
         print(f"✅ МЕТРИКИ: Общее время: {metrics['total_time']}с, Время LLM: {metrics['llm_time']}с, История: {metrics['history_length']} строк")
         print("="*50)
         time.sleep(1) # Пауза чтобы не превышать лимиты OpenRouter
@@ -624,7 +624,7 @@ def show_test_results():
         <div class="test">
             <div class="question">❓ Вопрос №{test['question_number']}: {test['question']}</div>
             <div class="metrics"><strong>🔍 RAG:</strong> <span class="{rag_class}">{'Успешно' if test["rag_success"] else 'Ошибка'}</span> | Время: {test['search_time']}с | Чанков: {test['chunks_found']} | Score: {test['best_score']} ({test['relevance_desc']})</div>
-            <div class="response"><strong>🤖 Ответ DEEPSEEK:</strong><br>{test['response'].replace('\n', '<br>')}</div>
+            <div class="response"><strong>🤖 Ответ GPT-4o MINI:</strong><br>{test['response'].replace('\n', '<br>')}</div>
             <div class="metrics"><strong>⏱️ Общее время:</strong> {test['metrics']['total_time']}с | <strong>🧠 Время LLM:</strong> {test['metrics']['llm_time']}с | <strong>💾 История:</strong> {test['metrics']['history_length']} строк</div>
         </div>"""
     
@@ -674,5 +674,5 @@ def hubspot_webhook():
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     debug_mode = os.environ.get('DEBUG', 'false').lower() == 'true'
-    print("="*60 + f"\n🚀 ЗАПУСК UKIDO AI ASSISTANT С DEEPSEEK\n" + "="*60)
+    print("="*60 + f"\n🚀 ЗАПУСК UKIDO AI ASSISTANT С GPT-4o MINI\n" + "="*60)
     app.run(debug=debug_mode, port=port, host='0.0.0.0')
