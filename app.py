@@ -212,7 +212,7 @@ def call_mistral(prompt):
                 "Content-Type": "application/json"
             },
             json={
-                "model": "mistralai/mistral-neko-instruct", 
+                "model": "mistralai/mistral-7b-instruct",
                 "messages": [{"role": "user", "content": prompt}]
             }
         )
