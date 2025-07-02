@@ -87,11 +87,20 @@ def get_pinecone_index():
 CONVERSATION_MEMORY_SIZE = 15
 CONVERSATION_EXPIRATION_SECONDS = 3600
 
-# --- УПРОЩЕННЫЕ ПРОМПТЫ ---
+# --- УЛУЧШЕННЫЕ ПРОМПТЫ С МЯГКИМ ВОЗВРАЩЕНИЕМ ---
 BASE_PROMPT = """Ты AI-ассистент школы soft skills для детей "Ukido". 
-Отвечай дружелюбно, используй только факты из предоставленной информации о школе.
-Если вопрос касается новой темы, забудь предыдущую тему и сосредоточься на новом вопросе.
-Если информации нет в контексте - честно скажи об этом."""
+
+ИНСТРУКЦИИ:
+1. Отвечай дружелюбно, используй только факты из предоставленной информации о школе
+2. Если вопрос о развитии детей/психологии, но нет прямой связи с Ukido - дай краткий общий ответ, затем мягко переведи на школу
+3. Если вопрос совсем не по теме - вежливо верни к теме Ukido
+4. Используй контекст истории диалога для понимания местоимений и переспросов
+
+ПРИМЕРЫ МЯГКОГО ВОЗВРАЩЕНИЯ:
+- "Интересный вопрос! В общем... А кстати, в нашей школе Ukido мы как раз..."
+- "Да, это важная тема. Если говорить о нашем подходе в Ukido..."
+- "Хороший вопрос, но я специализируюсь на школе Ukido. Расскажу лучше как мы..."
+"""
 
 # --- ФУНКЦИИ УПРАВЛЕНИЯ ПАМЯТЬЮ ДИАЛОГОВ ---
 
@@ -227,7 +236,7 @@ def generate_response(chat_id, user_message, is_test_mode=False):
     facts_context, rag_metrics = get_facts_from_rag(user_message)
     history_list = get_conversation_history(chat_id)
 
-    # --- Формируем полный промпт для Mistral ---
+    # --- Формируем полный промпт для DeepSeek ---
     history_context = "\n".join(history_list) if history_list else "Это начало диалога."
     full_prompt = f"{BASE_PROMPT}\n\nИстория диалога:\n{history_context}\n\nИнформация о школе Ukido:\n{facts_context}\n\nПользователь: {user_message}\nАссистент:"
 
@@ -257,6 +266,54 @@ def generate_response(chat_id, user_message, is_test_mode=False):
         print(f"❌ Критическая ошибка в generate_response: {e}")
         error_response = "Извините, возникла техническая проблема. Пожалуйста, попробуйте перефразировать вопрос."
         return error_response, {"error": str(e), "total_time": time.time() - start_time}
+
+# --- ТЕСТОВЫЕ ВОПРОСЫ ДЛЯ ПРОВЕРКИ ПАМЯТИ И РАЗГОВОРНЫХ ТЕМ ---
+CONVERSATION_TEST_QUESTIONS = [
+    # Блок 1: Проверка памяти и переспросов
+    "Расскажи о курсах для детей в вашей школе",
+    "А кто ведет курс для самых маленьких?",
+    "Расскажи о ней подробнее",
+    "Какие результаты показывают дети на этом курсе?",
+    "А сколько стоит этот курс?",
+    
+    # Блок 2: Философские и разговорные темы
+    "Какая философия образования у школы Ukido?",
+    "Расскажи больше о ваших ценностях",
+    "Как появилась идея создать школу?",
+    "В чем особенность вашего подхода к развитию детей?",
+    
+    # Блок 3: Общие вопросы о детской психологии
+    "Как развивать эмоциональный интеллект у детей?",
+    "Что делать с детской застенчивостью?", 
+    "Как мотивировать ребенка к обучению?",
+    "В каком возрасте лучше развивать лидерские качества?",
+    
+    # Блок 4: Вопросы вне темы с проверкой возвращения
+    "Какая погода будет завтра?",
+    "Кто выиграл чемпионат мира по футболу?",
+    "Как приготовить борщ?",
+    "Расскажи анекдот",
+    
+    # Блок 5: Возвращение к школьной теме
+    "Хорошо, вернемся к вашей школе. Какие гарантии вы даете?",
+    "Можно ли попробовать бесплатно?",
+    "Спасибо за информацию! Последний вопрос - как с вами связаться?",
+]
+
+# --- ФУНКЦИИ ТЕСТОВОЙ ПАМЯТИ ---
+def update_test_conversation_history(chat_id, user_message, ai_response):
+    """Обновляет память только для тестов, не затрагивая продакшн"""
+    if chat_id not in fallback_memory:
+        fallback_memory[chat_id] = []
+    fallback_memory[chat_id].append(f"Пользователь: {user_message}")
+    fallback_memory[chat_id].append(f"Ассистент: {ai_response}")
+    max_lines = CONVERSATION_MEMORY_SIZE * 2
+    if len(fallback_memory[chat_id]) > max_lines:
+        fallback_memory[chat_id] = fallback_memory[chat_id][-max_lines:]
+
+def get_test_conversation_history(chat_id):
+    """Получает тестовую историю"""
+    return fallback_memory.get(chat_id, [])
 
 # --- РАСШИРЕННЫЕ ТЕСТОВЫЕ ВОПРОСЫ ДЛЯ НАКОПИТЕЛЬНОГО ДИАЛОГА (25 ВОПРОСОВ) ---
 TEST_QUESTIONS = [
@@ -291,7 +348,9 @@ TEST_QUESTIONS = [
     "Подведите итог, почему я должен выбрать именно Ukido для своего 8-летнего сына?",
     "Какие у вас есть партнерства с известными компаниями?"
 ]
+
 latest_test_results = {"timestamp": None, "tests": [], "summary": {}}
+latest_conversation_results = {"timestamp": None, "tests": [], "summary": {}}
 
 # --- HUBSPOT ИНТЕГРАЦИЯ ---
 def send_to_hubspot(user_data):
@@ -349,6 +408,156 @@ def webhook():
         send_telegram_message(chat_id, ai_response)
         print(f"📊 Обработан запрос от {chat_id}: {metrics.get('total_time', 'N/A')}с")
     return "ok", 200
+
+@app.route('/test-conversation')
+def test_conversation_system():
+    """Тестирование памяти диалогов, разговорных тем и возвращения к школе"""
+    global latest_conversation_results
+    print("\n" + "="*60 + "\n🧪 ТЕСТИРОВАНИЕ ПАМЯТИ И РАЗГОВОРНЫХ ТЕМ\n" + "="*60)
+    
+    test_chat_id = "conversation_test_session"
+    
+    # Очищаем тестовую память
+    if test_chat_id in fallback_memory: 
+        del fallback_memory[test_chat_id]
+    
+    total_test_start = time.time()
+    latest_conversation_results = {"timestamp": datetime.now().isoformat(), "tests": [], "summary": {}}
+    
+    for i, question in enumerate(CONVERSATION_TEST_QUESTIONS, 1):
+        print(f"\n🧪 === ТЕСТ ПАМЯТИ №{i}/{len(CONVERSATION_TEST_QUESTIONS)} ===")
+        print(f"❓ ВОПРОС: {question}")
+        
+        # Используем RAG, но управляем памятью вручную для тестов
+        facts_context, rag_metrics = get_facts_from_rag(question)
+        test_history = get_test_conversation_history(test_chat_id)
+        
+        # Формируем промпт с тестовой историей
+        history_context = "\n".join(test_history) if test_history else "Это начало диалога."
+        full_prompt = f"{BASE_PROMPT}\n\nИстория диалога:\n{history_context}\n\nИнформация о школе Ukido:\n{facts_context}\n\nПользователь: {question}\nАссистент:"
+        
+        start_time = time.time()
+        llm_start = time.time()
+        response = call_deepseek(full_prompt)
+        llm_time = time.time() - llm_start
+        total_time = time.time() - start_time
+        
+        # Обновляем тестовую память
+        update_test_conversation_history(test_chat_id, question, response)
+        
+        metrics = {
+            "total_time": round(total_time, 2), 
+            "llm_time": round(llm_time, 2),
+            "rag_metrics": rag_metrics, 
+            "history_length": len(test_history),
+            "redis_available": redis_available, 
+            "pinecone_available": pinecone_available
+        }
+        
+        test_result = {
+            "question_number": i, "question": question, "response": response,
+            "metrics": metrics, "rag_success": rag_metrics.get('success', False),
+            "search_time": rag_metrics.get('search_time', 0),
+            "chunks_found": rag_metrics.get('chunks_found', 0),
+            "best_score": rag_metrics.get('best_score', 0),
+            "relevance_desc": rag_metrics.get('relevance_desc', 'Неизвестно'),
+            "memory_length": len(test_history)
+        }
+        latest_conversation_results["tests"].append(test_result)
+        
+        if rag_metrics.get('success', False):
+            print(f"🔍 RAG: {rag_metrics['search_time']}с, Чанков: {rag_metrics['chunks_found']}, Score: {rag_metrics['best_score']}")
+        
+        print(f"💾 ПАМЯТЬ: {len(test_history)} строк истории")
+        print(f"🤖 ОТВЕТ: {response}")
+        print("="*50)
+        
+        time.sleep(0.5)  # Небольшая пауза между вопросами
+    
+    # Очищаем тестовую память после теста
+    if test_chat_id in fallback_memory:
+        del fallback_memory[test_chat_id]
+    
+    total_test_time = time.time() - total_test_start
+    latest_conversation_results["summary"] = {
+        "total_time": round(total_test_time, 2), 
+        "avg_time_per_question": round(total_test_time/len(CONVERSATION_TEST_QUESTIONS), 2),
+        "redis_status": "available" if redis_available else "unavailable",
+        "pinecone_status": "available" if pinecone_available else "unavailable",
+        "questions_tested": len(CONVERSATION_TEST_QUESTIONS),
+        "final_memory_length": latest_conversation_results["tests"][-1]["memory_length"] if latest_conversation_results["tests"] else 0
+    }
+    
+    print(f"\n🎉 ТЕСТИРОВАНИЕ ПАМЯТИ ЗАВЕРШЕНО! Общее время: {total_test_time:.1f}с")
+    print(f"💾 Финальная длина памяти: {latest_conversation_results['summary']['final_memory_length']} строк")
+    print("📊 Результаты: /conversation-results")
+    
+    return latest_conversation_results, 200
+
+@app.route('/conversation-results')
+def show_conversation_results():
+    """Отображение результатов тестирования памяти"""
+    if not latest_conversation_results["tests"]:
+        return "<h1>Тестирование памяти не проводилось. Запустите <a href='/test-conversation'>/test-conversation</a></h1>"
+    
+    summary = latest_conversation_results['summary']
+    tests_html = ""
+    
+    for test in latest_conversation_results["tests"]:
+        memory_class = "good" if test["memory_length"] > 0 else "warning"
+        rag_class = "good" if test["rag_success"] else "error"
+        
+        tests_html += f"""
+        <div class="test">
+            <div class="question">❓ Вопрос №{test['question_number']}: {test['question']}</div>
+            <div class="metrics">
+                <strong>💾 Память:</strong> <span class="{memory_class}">{test['memory_length']} строк</span> | 
+                <strong>🔍 RAG:</strong> <span class="{rag_class}">{'✅' if test["rag_success"] else '❌'}</span> | 
+                Score: {test['best_score']} ({test['relevance_desc']})
+            </div>
+            <div class="response"><strong>🤖 Ответ:</strong><br>{test['response'].replace('\n', '<br>')}</div>
+            <div class="metrics"><strong>⏱️ Время:</strong> {test['metrics']['total_time']}с</div>
+        </div>"""
+    
+    redis_class = "good" if summary['redis_status'] == 'available' else 'error'
+    pinecone_class = "good" if summary['pinecone_status'] == 'available' else 'error'
+    
+    html = f"""
+    <!DOCTYPE html>
+    <html><head><title>Результаты тестирования памяти</title>
+    <style>
+        body {{ font-family: Arial; margin: 20px; }}
+        .summary {{ background: #f0f8ff; padding: 15px; border-radius: 8px; margin-bottom: 20px; }}
+        .test {{ background: #f9f9f9; padding: 15px; margin: 10px 0; border-radius: 8px; }}
+        .question {{ font-weight: bold; color: #2c3e50; margin-bottom: 8px; }}
+        .response {{ background: white; padding: 10px; border-left: 4px solid #3498db; margin: 10px 0; }}
+        .metrics {{ color: #7f8c8d; font-size: 0.9em; margin: 5px 0; }}
+        .good {{ color: #27ae60; font-weight: bold; }}
+        .warning {{ color: #f39c12; font-weight: bold; }}
+        .error {{ color: #e74c3c; font-weight: bold; }}
+    </style></head>
+    <body>
+    <h1>🧪 Результаты тестирования памяти и разговорных тем</h1>
+    <div class="summary">
+        <h3>📊 Суммарная статистика</h3>
+        <strong>Время тестирования:</strong> {summary['total_time']}с<br>
+        <strong>Среднее время на вопрос:</strong> {summary['avg_time_per_question']}с<br>
+        <strong>Вопросов протестировано:</strong> {summary['questions_tested']}<br>
+        <strong>Финальная длина памяти:</strong> {summary['final_memory_length']} строк<br>
+        <strong>Redis:</strong> <span class="{redis_class}">{summary['redis_status']}</span><br>
+        <strong>Pinecone:</strong> <span class="{pinecone_class}">{summary['pinecone_status']}</span>
+    </div>
+    {tests_html}
+    </body></html>
+    """
+    return html
+
+@app.route('/conversation-results-json')
+def get_conversation_results_json():
+    """JSON результаты тестирования памяти"""
+    if not latest_conversation_results["tests"]:
+        return {"error": "Тестирование памяти не проводилось", "hint": "Запустите /test-conversation сначала"}, 404
+    return latest_conversation_results, 200
 
 @app.route('/test-rag')
 def test_rag_system():
