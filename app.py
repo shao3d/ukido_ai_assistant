@@ -202,7 +202,7 @@ def get_facts_from_rag(user_message):
         metrics = {"search_time": round(total_time, 2), "error": str(e), "fallback_used": True, "chunks_found": 1, "success": False}
         return fallback_context, metrics
 
-# --- ФУНКЦИЯ ДЛЯ ВЫЗОВА MISTRAL ЧЕРЕЗ OPENROUTER (С ОТЛАДКОЙ) ---
+# --- ФУНКЦИЯ ДЛЯ ВЫЗОВА MISTRAL ЧЕРЕЗ OPENROUTER ---
 def call_mistral(prompt):
     try:
         response = requests.post(
@@ -216,7 +216,6 @@ def call_mistral(prompt):
                 "messages": [{"role": "user", "content": prompt}]
             }
         )
-        print(f"OpenRouter response: {response.json()}")  # ОТЛАДКА
         return response.json()["choices"][0]["message"]["content"]
     except Exception as e:
         print(f"Ошибка Mistral: {e}")
@@ -355,7 +354,7 @@ def webhook():
 @app.route('/test-rag')
 def test_rag_system():
     global latest_test_results
-    print("\n" + "="*60 + "\n🧪 НАЧАЛО ТЕСТИРОВАНИЯ С DEEPSEEK\n" + "="*60)
+    print("\n" + "="*60 + "\n🧪 НАЧАЛО ТЕСТИРОВАНИЯ С MISTRAL\n" + "="*60)
     test_chat_id = "test_user_session"
     if redis_available:
         try:
@@ -367,7 +366,7 @@ def test_rag_system():
     latest_test_results = {"timestamp": datetime.now().isoformat(), "tests": [], "summary": {}}
     
     for i, question in enumerate(TEST_QUESTIONS, 1):
-        print(f"\n🧪 === ТЕСТ №{i}/15 С DEEPSEEK ===")
+        print(f"\n🧪 === ТЕСТ №{i}/25 С MISTRAL ===")
         print(f"❓ ВОПРОС: {question}")
         response, metrics = generate_response(test_chat_id, question, is_test_mode=True)
         rag_metrics = metrics.get('rag_metrics', {})
@@ -386,7 +385,7 @@ def test_rag_system():
         else:
             print(f"⚠️ ПРОБЛЕМА С PINECONE: {rag_metrics.get('error', 'Неизвестная ошибка')}")
         
-        print(f"🤖 ОТВЕТ DEEPSEEK: {response}")
+        print(f"🤖 ОТВЕТ MISTRAL: {response}")
         print(f"✅ МЕТРИКИ: Общее время: {metrics['total_time']}с, Время LLM: {metrics['llm_time']}с, История: {metrics['history_length']} строк")
         print("="*50)
         time.sleep(1) # Пауза чтобы не превышать лимиты OpenRouter
@@ -396,7 +395,7 @@ def test_rag_system():
         "total_time": round(total_test_time, 2), "avg_time_per_question": round(total_test_time/25, 2),
         "redis_status": "available" if redis_available else "unavailable",
         "pinecone_status": "available" if pinecone_available else "unavailable",
-        "questions_tested": len(TEST_QUESTIONS)
+        "questions_tested": 25
     }
     print(f"\n🎉 ТЕСТИРОВАНИЕ ЗАВЕРШЕНО! Общее время: {total_test_time:.1f}с. Результаты доступны на /test-results и /test-results-json")
     return latest_test_results, 200
@@ -417,7 +416,7 @@ def show_test_results():
         <div class="test">
             <div class="question">❓ Вопрос №{test['question_number']}: {test['question']}</div>
             <div class="metrics"><strong>🔍 RAG:</strong> <span class="{rag_class}">{'Успешно' if test["rag_success"] else 'Ошибка'}</span> | Время: {test['search_time']}с | Чанков: {test['chunks_found']} | Score: {test['best_score']} ({test['relevance_desc']})</div>
-            <div class="response"><strong>🤖 Ответ DeepSeek:</strong><br>{test['response'].replace('\n', '<br>')}</div>
+            <div class="response"><strong>🤖 Ответ MISTRAL:</strong><br>{test['response'].replace('\n', '<br>')}</div>
             <div class="metrics"><strong>⏱️ Общее время:</strong> {test['metrics']['total_time']}с | <strong>🧠 Время LLM:</strong> {test['metrics']['llm_time']}с | <strong>💾 История:</strong> {test['metrics']['history_length']} строк</div>
         </div>"""
     
@@ -468,5 +467,5 @@ def hubspot_webhook():
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     debug_mode = os.environ.get('DEBUG', 'false').lower() == 'true'
-    print("="*60 + f"\n🚀 ЗАПУСК UKIDO AI ASSISTANT С DEEPSEEK\n" + "="*60)
+    print("="*60 + f"\n🚀 ЗАПУСК UKIDO AI ASSISTANT С MISTRAL\n" + "="*60)
     app.run(debug=debug_mode, port=port, host='0.0.0.0')
