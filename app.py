@@ -9,7 +9,7 @@ import time
 import json
 from datetime import datetime
 
-# --- НАСТРОЙКИ И ЗАГРУЗКА КЛЮЧЕЙ ---
+# --- НАСТРОЙКИ И ЗАГРУЗКА КЛЮЧЕЙ! ---
 load_dotenv()
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
