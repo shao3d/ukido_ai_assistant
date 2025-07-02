@@ -204,12 +204,18 @@ def get_facts_from_rag(user_message):
 # --- НОВАЯ ФУНКЦИЯ ДЛЯ ВЫЗОВА DEEPSEEK ---
 def call_deepseek_model(prompt):
     """Вызывает модель DeepSeek через OpenRouter API."""
+    # Получаем базовый URL один раз, чтобы использовать в Referer
+    base_url = os.environ.get('BASE_URL', 'https://ukidoaiassistant-production.up.railway.app')
+
     try:
         response = requests.post(
             url="https://openrouter.ai/api/v1/chat/completions",
             headers={
                 "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                "Content-Type": "application/json"
+                "Content-Type": "application/json",
+                # НОВЫЕ КЛЮЧЕВЫЕ ЗАГОЛОВКИ ДЛЯ OPENROUTER
+                "HTTP-Referer": base_url,
+                "X-Title": "Ukido AI Assistant"
             },
             json={
                 "model": "deepseek/deepseek-v3",
@@ -452,4 +458,3 @@ if __name__ == '__main__':
     debug_mode = os.environ.get('DEBUG', 'false').lower() == 'true'
     print("="*60 + f"\n🚀 ЗАПУСК UKIDO AI ASSISTANT С DEEPSEEK\n" + "="*60)
     app.run(debug=debug_mode, port=port, host='0.0.0.0')
-    # Код дл  khj kjhk jhkjh k
