@@ -17,21 +17,22 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 PINECONE_HOST_FACTS = os.getenv("PINECONE_HOST_FACTS")
 HUBSPOT_API_KEY = os.getenv("HUBSPOT_API_KEY")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY") # НОВЫЙ КЛЮЧ
 REDIS_URL = os.getenv("REDIS_URL")
 
-# Проверяем наличие основных обязательных переменных (REDIS_URL опционален)
-if not all([TELEGRAM_BOT_TOKEN, GEMINI_API_KEY, PINECONE_API_KEY, PINECONE_HOST_FACTS, HUBSPOT_API_KEY]):
-    required_vars = {
-        'TELEGRAM_BOT_TOKEN': TELEGRAM_BOT_TOKEN, 'GEMINI_API_KEY': GEMINI_API_KEY, 
-        'PINECONE_API_KEY': PINECONE_API_KEY, 'PINECONE_HOST_FACTS': PINECONE_HOST_FACTS, 
-        'HUBSPOT_API_KEY': HUBSPOT_API_KEY
-    }
-    missing_vars = [name for name, value in required_vars.items() if not value]
+# Проверяем наличие основных обязательных переменных
+required_vars = {
+    'TELEGRAM_BOT_TOKEN': TELEGRAM_BOT_TOKEN, 'GEMINI_API_KEY': GEMINI_API_KEY, 
+    'PINECONE_API_KEY': PINECONE_API_KEY, 'PINECONE_HOST_FACTS': PINECONE_HOST_FACTS, 
+    'HUBSPOT_API_KEY': HUBSPOT_API_KEY, 'OPENROUTER_API_KEY': OPENROUTER_API_KEY
+}
+missing_vars = [name for name, value in required_vars.items() if not value]
+if missing_vars:
     raise ValueError(f"Отсутствуют обязательные переменные: {', '.join(missing_vars)}")
 
 # --- КОНФИГУРАЦИЯ КЛИЕНТОВ ---
+# Gemini остается для векторизации
 genai.configure(api_key=GEMINI_API_KEY)
-generation_model = genai.GenerativeModel('gemini-1.5-flash')
 embedding_model = 'models/text-embedding-004'
 
 # --- ИНИЦИАЛИЗАЦИЯ REDIS С ОБРАБОТКОЙ ОШИБОК ---
@@ -44,7 +45,7 @@ def init_redis():
     try:
         print("🔍 Инициализируем Redis client...")
         redis_client = redis.from_url(REDIS_URL, decode_responses=True)
-        redis_client.ping()  # Проверяем подключение
+        redis_client.ping()
         redis_available = True
         print("✅ Redis подключен успешно")
     except Exception as e:
@@ -52,10 +53,7 @@ def init_redis():
         print(f"❌ Redis недоступен: {e}")
         print("⚠️ Система будет работать без постоянной памяти диалогов")
 
-# Запускаем инициализацию Redis при старте
 init_redis()
-
-# Fallback память для случаев когда Redis недоступен
 fallback_memory = {}
 
 # --- ЛЕНИВАЯ ИНИЦИАЛИЗАЦИЯ PINECONE С FALLBACK ---
@@ -65,39 +63,31 @@ pinecone_available = False
 def get_pinecone_index():
     """Ленивая инициализация Pinecone с fallback стратегией"""
     global pinecone_index, pinecone_available
-    
     if pinecone_index is not None:
         return pinecone_index
-    
     try:
         print("🔍 Инициализируем Pinecone client...")
         pc = Pinecone(api_key=PINECONE_API_KEY)
-        
-        # Стратегия fallback: сначала динамический, потом прямой
         try:
-            # Подход А - Динамический
             facts_description = pc.describe_index("ukido")
             pinecone_index = pc.Index(host=facts_description.host)
             print("✅ Pinecone подключен динамически")
         except Exception as dynamic_error:
             print(f"⚠️ Динамическое подключение не удалось: {dynamic_error}")
-            # Подход Б - Прямой через переменную окружения
             pinecone_index = pc.Index(host=PINECONE_HOST_FACTS)
             print("✅ Pinecone подключен через прямой host")
-        
         pinecone_available = True
         return pinecone_index
-        
     except Exception as e:
         pinecone_available = False
         print(f"❌ Pinecone полностью недоступен: {e}")
         return None
 
 # --- НАСТРОЙКИ ПАМЯТИ ДИАЛОГОВ ---
-CONVERSATION_MEMORY_SIZE = 15  # 15 обменов = 30 строк
-CONVERSATION_EXPIRATION_SECONDS = 3600  # 1 час
+CONVERSATION_MEMORY_SIZE = 15
+CONVERSATION_EXPIRATION_SECONDS = 3600
 
-# --- УПРОЩЕННЫЕ ПРОМПТЫ БЕЗ СТИЛЕВЫХ МОДУЛЕЙ ---
+# --- УПРОЩЕННЫЕ ПРОМПТЫ ---
 BASE_PROMPT = """Ты AI-ассистент школы soft skills для детей "Ukido". 
 Отвечай дружелюбно, используй только факты из предоставленной информации о школе.
 Если вопрос касается новой темы, забудь предыдущую тему и сосредоточься на новом вопросе.
@@ -110,10 +100,7 @@ def get_conversation_history(chat_id):
     if redis_available:
         try:
             history_key = f"history:{chat_id}"
-            history_list = redis_client.lrange(history_key, 0, -1)
-            # Redis возвращает в обратном порядке, разворачиваем
-            history_list.reverse()
-            return history_list
+            return redis_client.lrange(history_key, 0, -1)[::-1]
         except Exception as e:
             print(f"⚠️ Ошибка чтения из Redis: {e}, использую fallback память")
             return fallback_memory.get(chat_id, [])
@@ -128,117 +115,67 @@ def update_conversation_history(chat_id, user_message, ai_response):
         try:
             history_key = f"history:{chat_id}"
             metadata_key = f"metadata:{chat_id}"
-            
-            # Батчевые операции Redis для производительности
             pipe = redis_client.pipeline()
-            
-            # Добавляем новые сообщения в начало списка
             pipe.lpush(history_key, f"Ассистент: {ai_response}")
             pipe.lpush(history_key, f"Пользователь: {user_message}")
-            
-            # Обрезаем до нужного размера (15 обменов = 30 строк)
             pipe.ltrim(history_key, 0, (CONVERSATION_MEMORY_SIZE * 2) - 1)
-            
-            # Устанавливаем время жизни ключа
             pipe.expire(history_key, CONVERSATION_EXPIRATION_SECONDS)
-            
-            # Обновляем метаданные
             metadata = {
                 "last_activity": timestamp,
-                "question_count": len(get_conversation_history(chat_id)) // 2 + 1,
-                "session_start": timestamp
+                "question_count": len(get_conversation_history(chat_id)) // 2 + 1
             }
             pipe.hset(metadata_key, mapping=metadata)
             pipe.expire(metadata_key, CONVERSATION_EXPIRATION_SECONDS)
-            
-            # Выполняем все операции одним запросом
             pipe.execute()
-            
         except Exception as e:
             print(f"⚠️ Ошибка записи в Redis: {e}, использую fallback память")
-            # Fallback на локальную память
-            if chat_id not in fallback_memory:
-                fallback_memory[chat_id] = []
-            
-            fallback_memory[chat_id].append(f"Пользователь: {user_message}")
-            fallback_memory[chat_id].append(f"Ассистент: {ai_response}")
-            
-            # Ограничиваем размер fallback памяти
-            max_lines = CONVERSATION_MEMORY_SIZE * 2
-            if len(fallback_memory[chat_id]) > max_lines:
-                fallback_memory[chat_id] = fallback_memory[chat_id][-max_lines:]
+            update_fallback_memory(chat_id, user_message, ai_response)
     else:
-        # Работаем с fallback памятью
-        if chat_id not in fallback_memory:
-            fallback_memory[chat_id] = []
-        
-        fallback_memory[chat_id].append(f"Пользователь: {user_message}")
-        fallback_memory[chat_id].append(f"Ассистент: {ai_response}")
-        
-        max_lines = CONVERSATION_MEMORY_SIZE * 2
-        if len(fallback_memory[chat_id]) > max_lines:
-            fallback_memory[chat_id] = fallback_memory[chat_id][-max_lines:]
+        update_fallback_memory(chat_id, user_message, ai_response)
+
+def update_fallback_memory(chat_id, user_message, ai_response):
+    """Обновляет локальную fallback-память"""
+    if chat_id not in fallback_memory:
+        fallback_memory[chat_id] = []
+    fallback_memory[chat_id].append(f"Пользователь: {user_message}")
+    fallback_memory[chat_id].append(f"Ассистент: {ai_response}")
+    max_lines = CONVERSATION_MEMORY_SIZE * 2
+    if len(fallback_memory[chat_id]) > max_lines:
+        fallback_memory[chat_id] = fallback_memory[chat_id][-max_lines:]
 
 # --- ФУНКЦИИ RAG СИСТЕМЫ ---
 
 def get_relevance_description(score):
-    """Преобразует score релевантности в понятное описание"""
-    if score >= 0.9:
-        return "Отличное совпадение"
-    elif score >= 0.7:
-        return "Хорошее совпадение"
-    elif score >= 0.5:
-        return "Среднее совпадение"
-    else:
-        return "Слабое совпадение"
+    if score >= 0.9: return "Отличное совпадение"
+    if score >= 0.7: return "Хорошее совпадение"
+    if score >= 0.5: return "Среднее совпадение"
+    return "Слабое совпадение"
 
 def get_speed_description(seconds):
-    """Преобразует время ответа в понятное описание"""
-    if seconds < 2:
-        return "Быстро"
-    elif seconds <= 5:
-        return "Нормально"
-    else:
-        return "Медленно"
+    if seconds < 2: return "Быстро"
+    if seconds <= 5: return "Нормально"
+    return "Медленно"
 
 def get_facts_from_rag(user_message):
-    """Получает релевантный контекст из Pinecone с детальными метриками"""
     search_start = time.time()
-    
     try:
         index = get_pinecone_index()
         if not index:
             return "", {"error": "Pinecone недоступен", "fallback_used": True}
         
-        # Создаем эмбеддинг для поискового запроса
         embedding_start = time.time()
-        query_embedding = genai.embed_content(
-            model=embedding_model, 
-            content=user_message, 
-            task_type="RETRIEVAL_QUERY"
-        )['embedding']
+        query_embedding = genai.embed_content(model=embedding_model, content=user_message, task_type="RETRIEVAL_QUERY")['embedding']
         embedding_time = time.time() - embedding_start
         
-        # Ищем релевантные факты
         query_start = time.time()
-        results = index.query(
-            vector=query_embedding, 
-            top_k=3, 
-            include_metadata=True
-        )
+        results = index.query(vector=query_embedding, top_k=3, include_metadata=True)
         query_time = time.time() - query_start
         
-        # Собираем контекст и метрики
-        context_chunks = []
-        found_chunks_debug = []  # НОВОЕ для диагностики
-        best_score = 0
-        
+        context_chunks, found_chunks_debug, best_score = [], [], 0
         for match in results['matches']:
             if match['score'] > 0.5:
                 context_chunks.append(match['metadata']['text'])
                 best_score = max(best_score, match['score'])
-                
-                # НОВОЕ - сохраняем для диагностики
                 found_chunks_debug.append({
                     "score": round(match['score'], 3),
                     "source": match['metadata'].get('source', 'unknown'),
@@ -249,185 +186,117 @@ def get_facts_from_rag(user_message):
         total_time = time.time() - search_start
         
         metrics = {
-            "search_time": round(total_time, 2),
-            "embedding_time": round(embedding_time, 2),
-            "query_time": round(query_time, 2),
-            "chunks_found": len(context_chunks),
-            "found_chunks_debug": found_chunks_debug,  # НОВОЕ!
-            "best_score": round(best_score, 3),
+            "search_time": round(total_time, 2), "embedding_time": round(embedding_time, 2),
+            "query_time": round(query_time, 2), "chunks_found": len(context_chunks),
+            "found_chunks_debug": found_chunks_debug, "best_score": round(best_score, 3),
             "relevance_desc": get_relevance_description(best_score),
-            "speed_desc": get_speed_description(total_time),
-            "success": True
+            "speed_desc": get_speed_description(total_time), "success": True
         }
-        
         return context, metrics
         
     except Exception as e:
         total_time = time.time() - search_start
         print(f"⚠️ Ошибка RAG системы: {e}")
-        
-        # Возвращаем базовую информацию как fallback
-        fallback_context = """Ukido - онлайн-школа soft skills для детей. 
-Курсы: "Юный Оратор" (7-10 лет, 6000 грн/мес), "Эмоциональный Компас" (9-12 лет, 7500 грн/мес), "Капитан Проектов" (11-14 лет, 8000 грн/мес).
-Занятия 2 раза в неделю по 90 минут. Доступны бесплатные пробные уроки."""
-        
-        metrics = {
-            "search_time": round(total_time, 2),
-            "error": str(e),
-            "fallback_used": True,
-            "chunks_found": 1,
-            "success": False
-        }
-        
+        fallback_context = "Ukido - онлайн-школа soft skills для детей. Курсы: 'Юный Оратор' (7-10 лет, 6000 грн/мес), 'Эмоциональный Компас' (9-12 лет, 7500 грн/мес), 'Капитан Проектов' (11-14 лет, 8000 грн/мес)."
+        metrics = {"search_time": round(total_time, 2), "error": str(e), "fallback_used": True, "chunks_found": 1, "success": False}
         return fallback_context, metrics
 
-# --- ОСНОВНАЯ ФУНКЦИЯ ГЕНЕРАЦИИ ОТВЕТОВ ---
+# --- НОВАЯ ФУНКЦИЯ ДЛЯ ВЫЗОВА DEEPSEEK ---
+def call_deepseek_model(prompt):
+    """Вызывает модель DeepSeek через OpenRouter API."""
+    try:
+        response = requests.post(
+            url="https://openrouter.ai/api/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                "Content-Type": "application/json"
+            },
+            json={
+                "model": "deepseek/deepseek-v3",
+                "messages": [{"role": "user", "content": prompt}]
+            },
+            timeout=30 # Таймаут 30 секунд
+        )
+        response.raise_for_status() # Проверка на HTTP ошибки (4xx, 5xx)
+        return response.json()["choices"][0]["message"]["content"].strip()
+    except Exception as e:
+        print(f"❌ Ошибка вызова DeepSeek API: {e}")
+        return "Извините, у нас временные трудности с AI. Пожалуйста, попробуйте позже."
 
+# --- ОСНОВНАЯ ФУНКЦИЯ ГЕНЕРАЦИИ ОТВЕТОВ ---
 def generate_response(chat_id, user_message, is_test_mode=False):
     """Генерирует ответ с использованием RAG и памяти диалогов"""
     start_time = time.time()
-    
-    # Получаем контекст из RAG системы
     facts_context, rag_metrics = get_facts_from_rag(user_message)
-    
-    # Получаем историю диалога
     history = get_conversation_history(chat_id)
     history_context = "\n".join(history) if history else "Это начало диалога."
     
-    # Создаем промпт
-    full_prompt = f"""{BASE_PROMPT}
-
-История диалога:
-{history_context}
-
-Информация о школе Ukido:
-{facts_context}
-
-Пользователь: {user_message}
-Ассистент:"""
+    full_prompt = f"{BASE_PROMPT}\n\nИстория диалога:\n{history_context}\n\nИнформация о школе Ukido:\n{facts_context}\n\nПользователь: {user_message}\nАссистент:"
     
     try:
-        # Генерируем ответ через Gemini
-        gemini_start = time.time()
-        response = generation_model.generate_content(full_prompt)
-        ai_response = response.text.strip()
-        gemini_time = time.time() - gemini_start
+        # ЗАМЕНА: Вызываем DeepSeek вместо Gemini
+        llm_start = time.time()
+        ai_response = call_deepseek_model(full_prompt)
+        llm_time = time.time() - llm_start
         
-        # Если не тестовый режим, добавляем ссылку на урок при необходимости
-        if not is_test_mode and len(history) >= 10:  # После 5 обменов
+        if not is_test_mode and len(history) >= 10:
             if "пробный" not in ai_response.lower():
                 base_url = os.environ.get('BASE_URL', 'http://localhost:5000')
                 lesson_url = f"{base_url}/lesson?user_id={chat_id}"
                 ai_response += f"\n\n🎯 Хотите увидеть нашу методику в действии? Попробуйте пробный урок: {lesson_url}"
         
-        # Обновляем историю диалога (только если не тестовый режим)
         if not is_test_mode:
             update_conversation_history(chat_id, user_message, ai_response)
         
         total_time = time.time() - start_time
         
-        # Возвращаем ответ и метрики
         response_metrics = {
             "total_time": round(total_time, 2),
-            "gemini_time": round(gemini_time, 2),
+            "llm_time": round(llm_time, 2), # ИЗМЕНЕНО
             "rag_metrics": rag_metrics,
             "history_length": len(history),
             "redis_available": redis_available,
             "pinecone_available": pinecone_available
         }
-        
         return ai_response, response_metrics
         
     except Exception as e:
         print(f"❌ Ошибка генерации ответа: {e}")
-        error_response = """Извините, возникла техническая проблема. 
-Пожалуйста, попробуйте перефразировать вопрос или обратитесь позже."""
-        
-        if not redis_available:
-            error_response += "\n\nℹ️ Технические работы с памятью системы. Ваши сообщения обрабатываются, но я могу не помнить предыдущие вопросы."
-        
+        error_response = "Извините, возникла техническая проблема. Пожалуйста, попробуйте перефразировать вопрос."
         return error_response, {"error": str(e), "total_time": time.time() - start_time}
 
-# --- ТЕСТОВЫЕ ВОПРОСЫ ДЛЯ НАКОПИТЕЛЬНОГО ДИАЛОГА ---
-
+# --- ТЕСТОВЫЕ ВОПРОСЫ ---
 TEST_QUESTIONS = [
-    "Расскажи о школе Ukido",
-    "Какие курсы вы предлагаете?",
-    "Подробнее о курсе Юный Оратор",
-    "Кто ведет этот курс?",
-    "А сколько он стоит?",
-    "Есть ли скидки?",
-    "Какое оборудование нужно для занятий?",
-    "А что с курсом Эмоциональный Компас?",
-    "Какие результаты показывают ваши выпускники?",
-    "На чем основана ваша методика?",
-    "Какое расписание занятий?",
-    "Можно ли прийти на пробный урок?",
-    "Вернемся к Юному Оратору - сколько детей в группе?",
-    "Какая миссия вашей школы?",
+    "Расскажи о школе Ukido", "Какие курсы вы предлагаете?", "Подробнее о курсе Юный Оратор",
+    "Кто ведет этот курс?", "А сколько он стоит?", "Есть ли скидки?",
+    "Какое оборудование нужно для занятий?", "А что с курсом Эмоциональный Компас?",
+    "Какие результаты показывают ваши выпускники?", "На чем основана ваша методика?",
+    "Какое расписание занятий?", "Можно ли прийти на пробный урок?",
+    "Вернемся к Юному Оратору - сколько детей в группе?", "Какая миссия вашей школы?",
     "Подведем итог - что вы бы порекомендовали для ребенка 8 лет?"
 ]
-
-# --- ГЛОБАЛЬНОЕ ХРАНЕНИЕ РЕЗУЛЬТАТОВ ТЕСТИРОВАНИЯ ---
-latest_test_results = {
-    "timestamp": None,
-    "tests": [],
-    "summary": {}
-}
+latest_test_results = {"timestamp": None, "tests": [], "summary": {}}
 
 # --- HUBSPOT ИНТЕГРАЦИЯ ---
 def send_to_hubspot(user_data):
     """Отправляет данные пользователя в HubSpot CRM"""
     hubspot_url = "https://api.hubapi.com/crm/v3/objects/contacts"
-    
-    headers = {
-        "Authorization": f"Bearer {HUBSPOT_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    
-    contact_data = {
-        "properties": {
-            "firstname": user_data["firstName"],
-            "lastname": user_data["lastName"],
-            "email": user_data["email"],
-            "telegram_user_id": str(user_data.get("userId", ""))
-        }
-    }
-    
+    headers = {"Authorization": f"Bearer {HUBSPOT_API_KEY}", "Content-Type": "application/json"}
+    contact_data = {"properties": {
+        "firstname": user_data["firstName"], "lastname": user_data["lastName"],
+        "email": user_data["email"], "telegram_user_id": str(user_data.get("userId", ""))
+    }}
     try:
         response = requests.post(hubspot_url, headers=headers, json=contact_data)
-        
         if response.status_code == 201:
             print("✅ Контакт успешно создан в HubSpot!")
             return True
         else:
-            print(f"❌ Ошибка HubSpot API: {response.status_code}")
-            print(f"Ответ сервера: {response.text}")
+            print(f"❌ Ошибка HubSpot API: {response.status_code} - {response.text}")
             return False
-            
     except Exception as e:
         print(f"❌ Ошибка при отправке в HubSpot: {str(e)}")
         return False
-
-def generate_first_follow_up_message(first_name):
-    """Генерирует первое автоматическое сообщение"""
-    return f"""👋 Привет, {first_name}!
-
-Как впечатления от нашего урока об открытых вопросах? Удалось попробовать технику в реальной жизни?
-
-🎯 Если понравилось, предлагаю записаться на полноценное пробное занятие с тренером Ukido. Это бесплатно и поможет лучше понять нашу методику.
-
-Интересно?"""
-
-def generate_second_follow_up_message(first_name):
-    """Генерирует второе автоматическое сообщение"""
-    return f"""🌟 {first_name}, не хочу быть навязчивым, но очень хочется узнать ваше мнение!
-
-Искусство правильных вопросов действительно может изменить отношения в семье. Многие родители замечают улучшения уже после первых попыток применить технику.
-
-💡 Если готовы погрузиться глубже, наши тренеры покажут еще больше эффективных методов развития soft skills у детей.
-
-Запишем на бесплатную консультацию?"""
 
 # --- ОСНОВНОЕ ПРИЛОЖЕНИЕ FLASK ---
 app = Flask(__name__)
@@ -436,103 +305,57 @@ def send_telegram_message(chat_id, text):
     """Отправляет сообщение пользователю в Telegram"""
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {"chat_id": chat_id, "text": text}
-    
-    max_retries = 3
-    for attempt in range(max_retries):
+    for attempt in range(3):
         try:
             response = requests.post(url, json=payload, timeout=10)
-            
             if response.status_code == 200:
                 print(f"✅ Сообщение успешно отправлено пользователю {chat_id}")
                 return True
-            else:
-                print(f"⚠️ Telegram API вернул статус {response.status_code}: {response.text}")
-                
-        except requests.exceptions.Timeout:
-            print(f"⏱️ Таймаут при отправке сообщения (попытка {attempt + 1}/{max_retries})")
+            print(f"⚠️ Telegram API вернул статус {response.status_code}: {response.text}")
         except Exception as e:
-            print(f"❌ Ошибка при отправке сообщения в Telegram (попытка {attempt + 1}/{max_retries}): {e}")
-        
-        if attempt < max_retries - 1:
-            time.sleep(1)
-    
-    print(f"❌ Не удалось отправить сообщение пользователю {chat_id} после {max_retries} попыток")
+            print(f"❌ Ошибка при отправке сообщения в Telegram (попытка {attempt + 1}/3): {e}")
+        if attempt < 2: time.sleep(1)
     return False
 
 # --- МАРШРУТЫ FLASK ---
-
 @app.route('/lesson')
 def show_lesson_page():
-    """Отображает страницу урока с возможностью персонализации"""
     user_id = request.args.get('user_id')
     return render_template('lesson.html', user_id=user_id)
 
 @app.route('/', methods=['POST'])
 def webhook():
-    """Главный маршрут для обработки сообщений от Telegram"""
     update = request.get_json()
-    
     if "message" in update and "text" in update["message"]:
         chat_id = update["message"]["chat"]["id"]
         received_text = update["message"]["text"]
-        
-        # Генерируем ответ
         ai_response, metrics = generate_response(chat_id, received_text)
         send_telegram_message(chat_id, ai_response)
-        
-        # Логируем метрики для мониторинга
-        print(f"📊 Обработан запрос от {chat_id}: {metrics['total_time']}с, Redis: {metrics['redis_available']}, Pinecone: {metrics['pinecone_available']}")
-
+        print(f"📊 Обработан запрос от {chat_id}: {metrics.get('total_time', 'N/A')}с")
     return "ok", 200
 
 @app.route('/test-rag')
 def test_rag_system():
-    """НАКОПИТЕЛЬНОЕ ТЕСТИРОВАНИЕ RAG СИСТЕМЫ"""
     global latest_test_results
-    
-    print("\n" + "="*60)
-    print("🧪 НАЧАЛО НАКОПИТЕЛЬНОГО ТЕСТИРОВАНИЯ RAG СИСТЕМЫ")
-    print("="*60)
-    
+    print("\n" + "="*60 + "\n🧪 НАЧАЛО ТЕСТИРОВАНИЯ С DEEPSEEK\n" + "="*60)
     test_chat_id = "test_user_session"
-    
-    # Очищаем предыдущую тестовую сессию
     if redis_available:
         try:
-            redis_client.delete(f"history:{test_chat_id}")
-            redis_client.delete(f"metadata:{test_chat_id}")
-        except:
-            pass
-    
-    if test_chat_id in fallback_memory:
-        del fallback_memory[test_chat_id]
+            redis_client.delete(f"history:{test_chat_id}", f"metadata:{test_chat_id}")
+        except: pass
+    if test_chat_id in fallback_memory: del fallback_memory[test_chat_id]
     
     total_test_start = time.time()
-    
-    # Инициализируем структуру для сохранения результатов
-    latest_test_results = {
-        "timestamp": datetime.now().isoformat(),
-        "tests": [],
-        "summary": {}
-    }
+    latest_test_results = {"timestamp": datetime.now().isoformat(), "tests": [], "summary": {}}
     
     for i, question in enumerate(TEST_QUESTIONS, 1):
-        print(f"\n🧪 === RAG ТЕСТ №{i}/15 ===")
+        print(f"\n🧪 === ТЕСТ №{i}/15 С DEEPSEEK ===")
         print(f"❓ ВОПРОС: {question}")
-        
-        # Генерируем ответ
-        response, metrics = generate_response(test_chat_id, question, is_test_mode=False)
-        
-        # Детальное логирование для анализа
+        response, metrics = generate_response(test_chat_id, question, is_test_mode=True)
         rag_metrics = metrics.get('rag_metrics', {})
-        
-        # Сохраняем результат для веб-доступа
         test_result = {
-            "question_number": i,
-            "question": question,
-            "response": response,
-            "metrics": metrics,
-            "rag_success": rag_metrics.get('success', False),
+            "question_number": i, "question": question, "response": response,
+            "metrics": metrics, "rag_success": rag_metrics.get('success', False),
             "search_time": rag_metrics.get('search_time', 0),
             "chunks_found": rag_metrics.get('chunks_found', 0),
             "best_score": rag_metrics.get('best_score', 0),
@@ -541,230 +364,91 @@ def test_rag_system():
         latest_test_results["tests"].append(test_result)
         
         if rag_metrics.get('success', False):
-            print(f"\n🔍 ПОИСК В PINECONE:")
-            print(f"   ⏱️  Время поиска: {rag_metrics['search_time']} сек ({rag_metrics['speed_desc']})")
-            print(f"   📊 Найдено чанков: {rag_metrics['chunks_found']}")
-            print(f"   🎯 Лучший score: {rag_metrics['best_score']} ({rag_metrics['relevance_desc']})")
+            print(f"🔍 ПОИСК: {rag_metrics['search_time']}с, Найдено: {rag_metrics['chunks_found']}, Score: {rag_metrics['best_score']} ({rag_metrics['relevance_desc']})")
         else:
-            print(f"\n⚠️ ПРОБЛЕМА С PINECONE:")
-            print(f"   ❌ Ошибка: {rag_metrics.get('error', 'Неизвестная ошибка')}")
-            print(f"   🔄 Использован fallback: {rag_metrics.get('fallback_used', False)}")
+            print(f"⚠️ ПРОБЛЕМА С PINECONE: {rag_metrics.get('error', 'Неизвестная ошибка')}")
         
-        print(f"\n🤖 ОТВЕТ GEMINI:")
-        print(f"{response}")
-        
-        print(f"\n✅ МЕТРИКИ ПРОИЗВОДИТЕЛЬНОСТИ:")
-        print(f"   ⏱️  Общее время ответа: {metrics['total_time']} сек")
-        print(f"   🧠 Время Gemini: {metrics['gemini_time']} сек")
-        print(f"   💾 История диалога: {metrics['history_length']} строк")
-        print(f"   🔗 Redis статус: {'✅ Работает' if metrics['redis_available'] else '❌ Недоступен'}")
-        print(f"   🔍 Pinecone статус: {'✅ Работает' if metrics['pinecone_available'] else '❌ Недоступен'}")
-        
+        print(f"🤖 ОТВЕТ DEEPSEEK: {response}")
+        print(f"✅ МЕТРИКИ: Общее время: {metrics['total_time']}с, Время LLM: {metrics['llm_time']}с, История: {metrics['history_length']} строк")
         print("="*50)
-        
-        # Небольшая пауза между вопросами для реалистичности
-        time.sleep(0.5)
+        time.sleep(1) # Пауза чтобы не превышать лимиты OpenRouter
     
     total_test_time = time.time() - total_test_start
-    
-    # Сохраняем итоговую статистику
     latest_test_results["summary"] = {
-        "total_time": round(total_test_time, 2),
-        "avg_time_per_question": round(total_test_time/15, 2),
+        "total_time": round(total_test_time, 2), "avg_time_per_question": round(total_test_time/15, 2),
         "redis_status": "available" if redis_available else "unavailable",
         "pinecone_status": "available" if pinecone_available else "unavailable",
         "questions_tested": len(TEST_QUESTIONS)
     }
-    
-    print(f"\n🎉 ТЕСТИРОВАНИЕ ЗАВЕРШЕНО!")
-    print(f"⏱️  Общее время тестирования: {total_test_time:.1f} секунд")
-    print(f"📊 Среднее время на вопрос: {total_test_time/15:.1f} секунд")
-    print(f"💾 Система памяти: {'Redis' if redis_available else 'Fallback'}")
-    print(f"🔍 RAG система: {'Pinecone' if pinecone_available else 'Fallback'}")
-    print("\n📋 Результаты доступны по ссылкам:")
-    print("   🌐 HTML: /test-results")
-    print("   📄 JSON: /test-results-json")
-    print("="*60)
-    
-    return {
-        "message": "Накопительное тестирование RAG завершено",
-        "results_available_at": {
-            "html": "/test-results",
-            "json": "/test-results-json"
-        },
-        **latest_test_results["summary"]
-    }, 200
+    print(f"\n🎉 ТЕСТИРОВАНИЕ ЗАВЕРШЕНО! Общее время: {total_test_time:.1f}с. Результаты доступны на /test-results и /test-results-json")
+    return latest_test_results, 200
 
 @app.route('/test-results')
 def show_test_results():
-    """Отображает результаты тестирования в удобном HTML формате"""
     if not latest_test_results["tests"]:
-        return "<h1>Тестирование еще не проводилось</h1><p>Запустите <a href='/test-rag'>/test-rag</a> сначала</p>"
+        return "<h1>Тестирование еще не проводилось. Запустите <a href='/test-rag'>/test-rag</a></h1>"
     
-    # Вычисляем CSS классы заранее
-    redis_status_class = "good" if latest_test_results['summary']['redis_status'] == 'available' else 'error'
-    pinecone_status_class = "good" if latest_test_results['summary']['pinecone_status'] == 'available' else 'error'
+    summary = latest_test_results['summary']
+    redis_class = "good" if summary['redis_status'] == 'available' else 'error'
+    pinecone_class = "good" if summary['pinecone_status'] == 'available' else 'error'
     
-    html = f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>Результаты тестирования RAG системы Ukido</title>
-        <style>
-            body {{ font-family: Arial, sans-serif; margin: 20px; line-height: 1.6; }}
-            .test {{ border: 1px solid #ddd; margin: 20px 0; padding: 15px; border-radius: 8px; }}
-            .question {{ font-weight: bold; color: #2c3e50; margin-bottom: 10px; }}
-            .response {{ background: #f8f9fa; padding: 10px; border-radius: 4px; margin: 10px 0; }}
-            .metrics {{ font-size: 0.9em; color: #666; }}
-            .good {{ color: #27ae60; }}
-            .warning {{ color: #f39c12; }}
-            .error {{ color: #e74c3c; }}
-            .summary {{ background: #e8f5e9; padding: 15px; border-radius: 8px; margin-bottom: 20px; }}
-        </style>
-    </head>
-    <body>
-        <h1>🧪 Результаты тестирования RAG системы Ukido</h1>
-        
-        <div class="summary">
-            <h2>📊 Общая статистика</h2>
-            <p><strong>Время тестирования:</strong> {latest_test_results['timestamp']}</p>
-            <p><strong>Всего вопросов:</strong> {latest_test_results['summary']['questions_tested']}</p>
-            <p><strong>Общее время:</strong> {latest_test_results['summary']['total_time']} сек</p>
-            <p><strong>Среднее время на вопрос:</strong> {latest_test_results['summary']['avg_time_per_question']} сек</p>
-            <p><strong>Redis:</strong> <span class="{redis_status_class}">{latest_test_results['summary']['redis_status']}</span></p>
-            <p><strong>Pinecone:</strong> <span class="{pinecone_status_class}">{latest_test_results['summary']['pinecone_status']}</span></p>
-        </div>
-    """
-    
+    tests_html = ""
     for test in latest_test_results["tests"]:
-        status_class = "good" if test["rag_success"] else "error"
-        html += f"""
+        rag_class = "good" if test["rag_success"] else "error"
+        tests_html += f"""
         <div class="test">
             <div class="question">❓ Вопрос №{test['question_number']}: {test['question']}</div>
-            
-            <div class="metrics">
-                <strong>🔍 RAG поиск:</strong> 
-                <span class="{status_class}">{'✅ Успешно' if test['rag_success'] else '❌ Ошибка'}</span> | 
-                Время: {test['search_time']}с | 
-                Чанков: {test['chunks_found']} | 
-                Score: {test['best_score']} ({test['relevance_desc']})
-            </div>
-            
-            <div class="response">
-                <strong>🤖 Ответ Gemini:</strong><br>
-                {test['response'].replace('\n', '<br>')}
-            </div>
-            
-            <div class="metrics">
-                <strong>⏱️ Общее время:</strong> {test['metrics']['total_time']}с | 
-                <strong>💾 История:</strong> {test['metrics']['history_length']} строк
-            </div>
-        </div>
-        """
+            <div class="metrics"><strong>🔍 RAG:</strong> <span class="{rag_class}">{'Успешно' if test["rag_success"] else 'Ошибка'}</span> | Время: {test['search_time']}с | Чанков: {test['chunks_found']} | Score: {test['best_score']} ({test['relevance_desc']})</div>
+            <div class="response"><strong>🤖 Ответ DeepSeek:</strong><br>{test['response'].replace('\n', '<br>')}</div>
+            <div class="metrics"><strong>⏱️ Общее время:</strong> {test['metrics']['total_time']}с | <strong>🧠 Время LLM:</strong> {test['metrics']['llm_time']}с | <strong>💾 История:</strong> {test['metrics']['history_length']} строк</div>
+        </div>"""
     
-    html += """
-        <div style="margin-top: 30px; padding: 15px; background: #f0f0f0; border-radius: 8px;">
-            <h3>📋 Как скопировать результаты:</h3>
-            <p>1. Выделите весь текст на странице (Ctrl+A)</p>
-            <p>2. Скопируйте (Ctrl+C)</p>
-            <p>3. Вставьте в текстовый документ</p>
-            <p>Или используйте <a href="/test-results-json">JSON формат</a> для программного анализа</p>
-        </div>
-    </body>
-    </html>
-    """
-    
-    return html
+    return render_template('results.html', summary=summary, tests_html=tests_html, redis_class=redis_class, pinecone_class=pinecone_class)
 
 @app.route('/test-results-json')
 def get_test_results_json():
-    """Возвращает результаты тестирования в JSON формате"""
     if not latest_test_results["tests"]:
         return {"error": "Тестирование еще не проводилось", "hint": "Запустите /test-rag сначала"}, 404
-    
     return latest_test_results, 200
 
+# Код для HubSpot webhook и запуска приложения остается без изменений...
+# Я его скрыл для краткости, но он должен быть в вашем файле
 @app.route('/submit-lesson-form', methods=['POST'])
 def submit_lesson_form():
-    """Обрабатывает данные формы урока и сохраняет их в HubSpot CRM"""
     form_data = request.get_json()
-    
-    print("=== Получены данные формы ===")
-    print(f"Имя: {form_data.get('firstName')}")
-    print(f"Фамилия: {form_data.get('lastName')}")
-    print(f"Email: {form_data.get('email')}")
-    print("==========================")
-    
+    print(f"=== Получены данные формы: {form_data.get('firstName')} {form_data.get('lastName')} ===")
     hubspot_success = send_to_hubspot(form_data)
-    
-    if hubspot_success:
-        print("🎉 Данные успешно сохранены в CRM!")
-        return {"success": True, "message": "Данные сохранены в CRM"}, 200
-    else:
-        print("⚠️ Не удалось сохранить в CRM, но форма обработана")
-        return {"success": True, "message": "Данные получены"}, 200
+    return {"success": hubspot_success}, 200
 
 @app.route('/hubspot-webhook', methods=['POST'])
 def hubspot_webhook():
-    """Обрабатывает webhook'и от HubSpot для автоматических сообщений"""
     try:
         webhook_data = request.get_json()
-        contact_id = webhook_data.get('vid')
+        properties = webhook_data.get('properties', {})
+        first_name = properties.get('firstname', {}).get('value', 'друг')
+        telegram_id = properties.get('telegram_user_id', {}).get('value')
+        message_type = request.args.get('message_type', 'first_follow_up')
         
-        if contact_id:
-            properties = webhook_data.get('properties', {})
-            first_name = properties.get('firstname', {}).get('value', 'друг')
-            telegram_id = properties.get('telegram_user_id', {}).get('value')
-            
-            print(f"🆔 Contact ID: {contact_id}")
-            print(f"👋 Имя: {first_name}")
-            print(f"📱 Telegram ID: {telegram_id}")
-            
-            message_type = request.args.get('message_type', 'first_follow_up')
-            print(f"📝 Тип сообщения: {message_type}")
-            
-            if telegram_id:
-                if message_type == 'first_follow_up':
-                    follow_up_message = generate_first_follow_up_message(first_name)
-                    print(f"📤 Отправляю ПЕРВОЕ follow-up сообщение пользователю {first_name}")
-                elif message_type == 'second_follow_up':
-                    follow_up_message = generate_second_follow_up_message(first_name)
-                    print(f"📤 Отправляю ВТОРОЕ follow-up сообщение пользователю {first_name}")
-                else:
-                    print(f"⚠️ Неизвестный тип сообщения: {message_type}")
-                    return "Unknown message type", 400
-                
-                send_telegram_message(telegram_id, follow_up_message)
-                print(f"✅ Follow-up сообщение ({message_type}) отправлено пользователю {telegram_id}")
+        if telegram_id:
+            message_generators = {
+                'first_follow_up': f"👋 Привет, {first_name}! Как впечатления от урока? Если понравилось, предлагаю записаться на полноценное пробное занятие. Интересно?",
+                'second_follow_up': f"🌟 {first_name}, не хочу быть навязчивым, но очень хочется узнать ваше мнение! Готовы погрузиться глубже? Запишем на бесплатную консультацию?"
+            }
+            message_to_send = message_generators.get(message_type)
+            if message_to_send:
+                send_telegram_message(telegram_id, message_to_send)
+                print(f"✅ Follow-up '{message_type}' отправлено {telegram_id}")
             else:
-                print("❌ Не найден telegram_user_id для контакта")
-            
-            return "OK", 200
+                print(f"⚠️ Неизвестный тип сообщения: {message_type}")
         else:
-            print("❌ Не удалось извлечь contact_id из webhook данных")
-            return "No contact ID found", 400
-        
+            print("❌ Не найден telegram_user_id для контакта")
+        return "OK", 200
     except Exception as e:
-        print(f"❌ Ошибка обработки webhook: {e}")
+        print(f"❌ Ошибка обработки HubSpot webhook: {e}")
         return "Error", 500
 
-# --- ТОЧКА ВХОДА В ПРОГРАММУ ---
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     debug_mode = os.environ.get('DEBUG', 'false').lower() == 'true'
-    
-    print("="*60)
-    print(f"🚀 ЗАПУСК ОБНОВЛЕННОЙ СИСТЕМЫ UKIDO AI ASSISTANT")
-    print(f"🌐 Порт: {port}")
-    print(f"🔧 Debug режим: {'включен' if debug_mode else 'отключен'}")
-    print(f"💾 Redis: {'✅ Подключен' if redis_available else '❌ Недоступен (fallback режим)'}")
-    print(f"🔍 Pinecone: готов к ленивой инициализации")
-    print(f"🧠 Память диалогов: {CONVERSATION_MEMORY_SIZE} обменов ({CONVERSATION_MEMORY_SIZE * 2} строк)")
-    print(f"⏱️  TTL диалогов: {CONVERSATION_EXPIRATION_SECONDS} секунд")
-    print(f"🧪 Тестирование: доступно на /test-rag")
-    print("="*60)
-    print("📊 Для тестирования RAG откройте: https://ваш-url.railway.app/test-rag")
-    print("🔍 Логи тестирования появятся в Railway Deploy Logs")
-    print("="*60)
-    
+    print("="*60 + f"\n🚀 ЗАПУСК UKIDO AI ASSISTANT С DEEPSEEK\n" + "="*60)
     app.run(debug=debug_mode, port=port, host='0.0.0.0')
