@@ -751,20 +751,25 @@ def generate_response(chat_id: str, user_message: str, is_test_mode: bool = Fals
 Пользователь: {user_message}
 Ассистент:"""
 
+
         llm_start = time.time()
         ai_response = call_gpt4o_mini(full_prompt)
         llm_time = time.time() - llm_start
 
-        # ЖЕЛЕЗНЫЙ КУЛАК: Обработка токенов действий (ЕДИНСТВЕННЫЙ способ генерации ссылок)
-        base_url = os.environ.get('BASE_URL', 'https://ukidoaiassistant-production.up.railway.app')
-        if "[ACTION:SEND_LESSON_LINK]" in ai_response:
-            lesson_url = f"{base_url}/lesson?user_id={chat_id}"
-            ai_response = ai_response.replace("[ACTION:SEND_LESSON_LINK]", lesson_url)
-            logger.info("Обработан токен [ACTION:SEND_LESSON_LINK] - ссылка вставлена")
-
         # ЖЕЛЕЗНЫЙ КУЛАК: Thread-safe анализ и обновление состояния диалога
         new_state = analyze_and_determine_next_state(user_message, ai_response, current_state)
-        
+        base_url = os.environ.get('BASE_URL', 'https://ukidoaiassistant-production.up.railway.app')
+        lesson_url = f"{base_url}/lesson?user_id={chat_id}"
+
+        # ИСПРАВЛЕНИЕ: ПРИНУДИТЕЛЬНАЯ ВСТАВКА ССЫЛКИ, ЕСЛИ МОДЕЛЬ ЗАБЫЛА
+        if new_state == 'closing' and "[ACTION:SEND_LESSON_LINK]" not in ai_response and "/lesson?user_id=" not in ai_response:
+            ai_response += f"\n\nЧтобы попробовать, вот ссылка для записи на пробный урок: {lesson_url}"
+            logger.info("Токен не был сгенерирован LLM, ссылка добавлена принудительно.")
+        # Стандартная обработка токена, если модель его все-таки сгенерировала
+        elif "[ACTION:SEND_LESSON_LINK]" in ai_response:
+            ai_response = ai_response.replace("[ACTION:SEND_LESSON_LINK]", lesson_url)
+            logger.info("Обработан токен [ACTION:SEND_LESSON_LINK] - ссылка вставлена.")
+
         if not is_test_mode and chat_id:
             update_dialogue_state(chat_id, new_state)
             update_conversation_history(chat_id, user_message, ai_response)
