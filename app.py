@@ -798,22 +798,28 @@ def generate_response(chat_id: str, user_message: str, is_test_mode: bool = Fals
         total_time = time.time() - start_time
         performance_monitor.record_request(success, total_time)
 
-# --- ЖЕЛЕЗНЫЙ КУЛАК: ТЕСТОВЫЕ ВОПРОСЫ ---
-IRON_FIST_TEST_QUESTIONS = [
-    # Тест машины состояний
-    "Привет, расскажите о вашей школе.",  # greeting
-    "Какие у вас есть курсы?",  # fact_finding
-    "Мой ребенок очень застенчивый, боится отвечать у доски.",  # problem_solving
-    "Хочу записаться на пробный урок!",  # closing (прямой запрос)
-    
-    # Тест переписывания запросов
-    "Сколько это стоит?",  # должно переписаться с учетом контекста
-    "А кто его ведет?",  # анафора "его"
-    "Какое расписание?",  # требует конкретизации
-    
-    # Тест токенов действий
-    "Как попробовать ваш курс?",  # должен вызвать [ACTION:SEND_LESSON_LINK]
-    "Дайте ссылку на пробный урок",  # прямой запрос ссылки
+# --- ЖЕЛЕЗНЫЙ КУЛАК: СКВОЗНОЙ СЦЕНАРИЙ ТЕСТИРОВАНИЯ ---
+E2E_TEST_SCENARIO = [
+    # 1. Приветствие и начало диалога (ожидаемое состояние: greeting)
+    "Привет, расскажи о вашей школе",
+
+    # 2. Вопрос о курсах (ожидаемый переход в fact_finding)
+    "Какие у вас есть курсы по ораторскому искусству?",
+
+    # 3. Короткий вопрос для проверки переписывания (остается в fact_finding)
+    "а сколько стоит?",
+
+    # 4. Переход к проблеме (ожидаемый переход в problem_solving)
+    "Спасибо. У моего сына (ему 10 лет) как раз есть проблема, он очень боится выступать перед классом.",
+
+    # 5. Поддержание диалога (остается в problem_solving)
+    "Да, он боится, что над ним будут смеяться. Говорит, что все мысли путаются.",
+
+    # 6. Выражение готовности (ожидаемый переход в closing и получение ссылки)
+    "Звучит убедительно. Думаю, нам стоит попробовать. Как это сделать?",
+
+    # 7. Завершающий вопрос (остается в closing)
+    "Отлично, спасибо!"
 ]
 
 # --- ТЕСТОВЫЕ ФУНКЦИИ С ИЗОЛЯЦИЕЙ ---
@@ -975,62 +981,62 @@ def webhook():
         logger.error(f"Ошибка в webhook: {e}")
         return "Error", 500
 
+
 @app.route('/test-iron-fist')
 def test_iron_fist_system():
-    """ИСПРАВЛЕНО: Thread-safe тестирование системы Железный Кулак"""
+    """ИСПРАВЛЕНО: Сквозное тестирование системы Железный Кулак"""
     global latest_test_results
-    
+
     with test_results_lock:
-        logger.info("НАЧАЛО ТЕСТИРОВАНИЯ СИСТЕМЫ ЖЕЛЕЗНЫЙ КУЛАК")
-        
-        test_chat_id = "iron_fist_test_session"
-        
-        # Полная очистка тестовых данных
+        logger.info("НАЧАЛО СКВОЗНОГО ТЕСТИРОВАНИЯ СИСТЕМЫ ЖЕЛЕЗНЫЙ КУЛАК")
+
+        test_chat_id = "e2e_test_session"
+
+        # Полная очистка тестовых данных ОДИН РАЗ в начале сессии
         clear_test_data(test_chat_id)
-        
+
         total_test_start = time.time()
         latest_test_results = {"timestamp": datetime.now().isoformat(), "tests": [], "summary": {}}
-        
-        for i, question in enumerate(IRON_FIST_TEST_QUESTIONS, 1):
-            logger.info(f"ТЕСТ №{i}/{len(IRON_FIST_TEST_QUESTIONS)}: {question}")
-            
+
+        # Проходим по новому сценарию E2E_TEST_SCENARIO
+        for i, question in enumerate(E2E_TEST_SCENARIO, 1):
+            logger.info(f"ТЕСТОВЫЙ ШАГ №{i}/{len(E2E_TEST_SCENARIO)}: {question}")
+
+            # is_test_mode=True, чтобы не писать в прод-базу, но история будет сохраняться в тестовой памяти
             response, metrics = generate_response(test_chat_id, question, is_test_mode=True)
             rag_metrics = metrics.get('rag_metrics', {})
-            
+
             test_result = {
                 "question_number": i, "question": question, "response": response,
                 "metrics": metrics, "rag_success": rag_metrics.get('success', False),
-                "search_time": rag_metrics.get('search_time', 0),
-                "chunks_found": rag_metrics.get('chunks_found', 0),
-                "best_score": rag_metrics.get('best_score', 0),
-                "relevance_desc": rag_metrics.get('relevance_desc', 'Неизвестно'),
+                "history_length": metrics.get('history_length', 0), # Теперь это поле будет меняться
                 "state_transition": metrics.get('dialogue_state_transition', 'N/A'),
                 "query_rewrite": rag_metrics.get('rewritten_query', question) != question,
-                "action_tokens_used": "[ACTION:SEND_LESSON_LINK]" in response or "lesson?user_id=" in response,
+                "action_tokens_used": "/lesson?user_id=" in response,
                 "cache_hit": metrics.get('cache_hit', False)
             }
             latest_test_results["tests"].append(test_result)
-            
-            # Обновляем тестовую память для следующих вопросов
+
+            # ВАЖНО: Обновляем тестовую память для СЛЕДУЮЩЕГО шага диалога
+            # Это ключевая логика для симуляции непрерывного разговора
             update_test_conversation_history(test_chat_id, question, response)
             time.sleep(0.5)
-        
-        # Полная очистка после тестов
+
+        # Полная очистка после всех тестов
         clear_test_data(test_chat_id)
-        
+
         total_test_time = time.time() - total_test_start
         latest_test_results["summary"] = {
             "total_time": round(total_test_time, 2), 
-            "avg_time_per_question": round(total_test_time/len(IRON_FIST_TEST_QUESTIONS), 2),
+            "avg_time_per_question": round(total_test_time/len(E2E_TEST_SCENARIO), 2),
             "redis_status": "available" if redis_available else "unavailable",
             "pinecone_status": "available" if pinecone_available else "unavailable",
-            "questions_tested": len(IRON_FIST_TEST_QUESTIONS),
-            "iron_fist_features_tested": ["state_machine", "query_rewriting", "action_tokens", "caching", "thread_safety"],
-            "performance_metrics": performance_monitor.get_metrics()
+            "questions_tested": len(E2E_TEST_SCENARIO),
+            "test_type": "End-to-End Conversation Scenario"
         }
-        
-        logger.info(f"ТЕСТИРОВАНИЕ ЗАВЕРШЕНО! Общее время: {total_test_time:.1f}с")
-        
+
+        logger.info(f"СКВОЗНОЕ ТЕСТИРОВАНИЕ ЗАВЕРШЕНО! Общее время: {total_test_time:.1f}с")
+
         return latest_test_results, 200
 
 @app.route('/iron-fist-results')
