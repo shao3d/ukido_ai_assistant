@@ -734,7 +734,11 @@ def generate_response(chat_id: str, user_message: str, is_test_mode: bool = Fals
         
         # Получаем контекст из RAG с переписыванием запросов
         facts_context, rag_metrics = get_facts_from_rag(user_message, chat_id)
-        history_list = get_conversation_history(chat_id)
+        # ИСПРАВЛЕНИЕ: Используем правильную историю в зависимости от режима
+        if is_test_mode:
+            history_list = get_test_conversation_history(chat_id)
+        else:
+            history_list = get_conversation_history(chat_id)
 
         # Формируем промпт с учетом состояния диалога
         enhanced_prompt = get_enhanced_base_prompt(current_state)
