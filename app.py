@@ -23,6 +23,7 @@ from config import config
 from telegram_bot import telegram_bot
 from conversation import conversation_manager
 from rag_system import rag_system
+from hubspot_client import hubspot_client
 
 
 class AIAssistantService:
@@ -327,22 +328,22 @@ def lesson_page():
 
 @app.route('/submit-lesson-form', methods=['POST'])
 def submit_lesson_form():
-    """
-    Обработка формы урока и отправка данных в HubSpot.
-    
-    Пока оставляем здесь, так как это связано с веб-интерфейсом.
-    В будущем можно вынести в отдельный модуль.
-    """
+    """Обработка формы урока и отправка данных в HubSpot"""
     try:
         form_data = request.get_json()
         if not form_data:
             return {"success": False, "error": "Нет данных"}, 400
         
-        # Здесь будет интеграция с HubSpot
-        # Пока возвращаем заглушку
-        logging.getLogger(__name__).info(f"Получены данные формы: {form_data}")
+        logger = logging.getLogger(__name__)
+        logger.info(f"Получены данные формы: {form_data.get('firstName')} {form_data.get('lastName')}")
         
-        return {"success": True, "message": "Данные получены"}, 200
+        # Отправляем в HubSpot
+        hubspot_success = hubspot_client.create_contact(form_data)
+        
+        if hubspot_success:
+            return {"success": True, "message": "Данные сохранены в CRM"}, 200
+        else:
+            return {"success": True, "message": "Данные получены"}, 200  # Graceful degradation
         
     except Exception as e:
         logging.getLogger(__name__).error(f"Ошибка обработки формы: {e}")
@@ -351,17 +352,16 @@ def submit_lesson_form():
 
 @app.route('/hubspot-webhook', methods=['POST'])
 def hubspot_webhook():
-    """
-    Webhook для автоматических follow-up сообщений от HubSpot.
-    
-    Пока оставляем здесь, в будущем можно вынести в отдельный модуль.
-    """
+    """Webhook для автоматических follow-up сообщений от HubSpot"""
     try:
         webhook_data = request.get_json()
-        logging.getLogger(__name__).info(f"HubSpot webhook: {webhook_data}")
+        if not webhook_data:
+            return "No data", 400
         
-        # Здесь будет логика обработки HubSpot webhook'ов
-        return "OK", 200
+        message_type = request.args.get('message_type', 'first_follow_up')
+        success = hubspot_client.process_webhook(webhook_data, message_type)
+        
+        return "OK" if success else "Error", 200
         
     except Exception as e:
         logging.getLogger(__name__).error(f"Ошибка HubSpot webhook: {e}")
