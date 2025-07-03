@@ -1,8 +1,19 @@
-# conversation.py
+# conversation.py (CRITICAL THREADING FIX)
 """
-Модуль для управления состояниями диалога и памятью разговоров.
-Отвечает за понимание контекста беседы, переходы между состояниями
-и сохранение истории общения с каждым пользователем.
+КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Устранение deadlocks при parallel execution
+
+ПРОБЛЕМА: app.py использует ThreadPoolExecutor для параллельных операций:
+- get_dialogue_state(chat_id)  
+- get_conversation_history(chat_id)
+- update_conversation_history(chat_id, ...)
+
+При одновременном доступе к одному chat_id возможны deadlocks из-за user-level locks.
+
+РЕШЕНИЕ:
+1. Timeout-based locks для предотвращения deadlocks
+2. Read-Write lock pattern для concurrent reads
+3. Atomic operations для thread-safe updates
+4. Graceful degradation при lock timeouts
 """
 
 import redis
@@ -15,15 +26,142 @@ from typing import List, Dict, Any, Optional, Tuple
 from config import config
 
 
+class TimeoutLock:
+    """
+    Lock с timeout для предотвращения deadlocks
+    """
+    
+    def __init__(self, timeout: float = 5.0):
+        self._lock = threading.Lock()
+        self.timeout = timeout
+        self.logger = logging.getLogger(f"{__name__}.TimeoutLock")
+    
+    def acquire(self, timeout: Optional[float] = None) -> bool:
+        """Попытка получить блокировку с timeout"""
+        timeout = timeout or self.timeout
+        return self._lock.acquire(timeout=timeout)
+    
+    def release(self):
+        """Освобождение блокировки"""
+        try:
+            self._lock.release()
+        except Exception as e:
+            self.logger.warning(f"Lock release warning: {e}")
+    
+    def __enter__(self):
+        acquired = self.acquire()
+        if not acquired:
+            raise TimeoutError("Failed to acquire lock within timeout")
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.release()
+
+
+class ReadWriteLock:
+    """
+    Read-Write lock для concurrent reads без блокировки
+    """
+    
+    def __init__(self):
+        self._read_ready = threading.Condition(threading.RLock())
+        self._readers = 0
+        
+    def acquire_read(self, timeout: float = 5.0):
+        """Получить read lock"""
+        return ReadContext(self, timeout)
+    
+    def acquire_write(self, timeout: float = 5.0):
+        """Получить write lock"""
+        return WriteContext(self, timeout)
+    
+    def _acquire_read_internal(self, timeout: float) -> bool:
+        """Внутренний метод для read lock"""
+        if not self._read_ready.acquire(timeout=timeout):
+            return False
+        try:
+            self._readers += 1
+            return True
+        finally:
+            self._read_ready.release()
+    
+    def _release_read_internal(self):
+        """Внутренний метод для release read lock"""
+        with self._read_ready:
+            self._readers -= 1
+            if self._readers == 0:
+                self._read_ready.notifyAll()
+    
+    def _acquire_write_internal(self, timeout: float) -> bool:
+        """Внутренний метод для write lock"""
+        if not self._read_ready.acquire(timeout=timeout):
+            return False
+        try:
+            start_time = time.time()
+            while self._readers > 0:
+                remaining_timeout = timeout - (time.time() - start_time)
+                if remaining_timeout <= 0:
+                    return False
+                self._read_ready.wait(remaining_timeout)
+            return True
+        finally:
+            pass  # Не освобождаем lock здесь - это сделает WriteContext
+    
+    def _release_write_internal(self):
+        """Внутренний метод для release write lock"""
+        try:
+            self._read_ready.release()
+        except Exception:
+            pass
+
+
+class ReadContext:
+    """Context manager для read operations"""
+    
+    def __init__(self, rw_lock: ReadWriteLock, timeout: float):
+        self.rw_lock = rw_lock
+        self.timeout = timeout
+        self.acquired = False
+    
+    def __enter__(self):
+        self.acquired = self.rw_lock._acquire_read_internal(self.timeout)
+        if not self.acquired:
+            raise TimeoutError("Failed to acquire read lock within timeout")
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self.acquired:
+            self.rw_lock._release_read_internal()
+
+
+class WriteContext:
+    """Context manager для write operations"""
+    
+    def __init__(self, rw_lock: ReadWriteLock, timeout: float):
+        self.rw_lock = rw_lock
+        self.timeout = timeout
+        self.acquired = False
+    
+    def __enter__(self):
+        self.acquired = self.rw_lock._acquire_write_internal(self.timeout)
+        if not self.acquired:
+            raise TimeoutError("Failed to acquire write lock within timeout")
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self.acquired:
+            self.rw_lock._release_write_internal()
+
+
 class ConversationManager:
     """
-    Класс для управления состояниями диалога и памятью разговоров.
+    THREAD-SAFE версия менеджера диалогов с поддержкой parallel execution
     
-    Принципы работы:
-    1. Каждый пользователь имеет свое состояние диалога (greeting, fact_finding, problem_solving, closing)
-    2. История сообщений сохраняется в Redis (или fallback памяти)
-    3. Состояния переключаются на основе анализа сообщений пользователя
-    4. Все операции thread-safe для работы в многопоточной среде
+    КРИТИЧЕСКИЕ ИСПРАВЛЕНИЯ:
+    1. Read-Write locks для concurrent reads
+    2. Timeout-based locks для предотвращения deadlocks  
+    3. Atomic operations для thread-safe updates
+    4. Graceful degradation при timeouts
     """
     
     # Определяем возможные состояния диалога
@@ -52,15 +190,25 @@ class ConversationManager:
         self.redis_available = False
         self._init_redis()
         
-        # Fallback память для случая, когда Redis недоступен
+        # ИСПРАВЛЕНО: Fallback память с thread-safe доступом
         self.fallback_memory = {}
-        self.fallback_memory_lock = threading.Lock()
+        self.fallback_memory_lock = threading.RLock()
         
-        # Thread safety: блокировки для каждого пользователя
-        self.user_locks = {}
-        self.user_locks_lock = threading.Lock()
+        # ИСПРАВЛЕНО: Read-Write locks для каждого пользователя
+        self.user_rw_locks = {}
+        self.user_locks_lock = threading.RLock()
         
-        self.logger.info("🧠 Менеджер диалогов инициализирован")
+        # Performance metrics для мониторинга
+        self.performance_stats = {
+            'successful_reads': 0,
+            'successful_writes': 0,
+            'timeout_errors': 0,
+            'redis_errors': 0,
+            'fallback_usage': 0
+        }
+        self.stats_lock = threading.Lock()
+        
+        self.logger.info("🧠 Thread-safe менеджер диалогов инициализирован")
         
         # Очистка памяти при старте (для тестирования)
         if config.CLEAR_MEMORY_ON_START:
@@ -70,154 +218,176 @@ class ConversationManager:
     def _init_redis(self):
         """
         Инициализирует Redis соединение с graceful degradation.
-        Если Redis недоступен, система будет работать с fallback памятью.
         """
-        if not config.REDIS_URL:
-            self.logger.info("🔶 Redis URL не настроен, используем fallback память")
-            return
-        
         try:
-            self.redis_client = redis.from_url(config.REDIS_URL, decode_responses=True)
-            self.redis_client.ping()  # Проверяем соединение
-            self.redis_available = True
-            self.logger.info("✅ Redis подключен успешно")
+            if config.REDIS_URL:
+                self.redis_client = redis.from_url(config.REDIS_URL, decode_responses=True)
+                # Проверяем соединение
+                self.redis_client.ping()
+                self.redis_available = True
+                self.logger.info("✅ Redis соединение установлено")
+            else:
+                self.logger.info("ℹ️ Redis URL не найден, используется fallback память")
         except Exception as e:
+            self.logger.warning(f"⚠️ Redis недоступен: {e}. Используется fallback память")
             self.redis_available = False
-            self.logger.warning(f"⚠️ Redis недоступен: {e}")
-            self.logger.info("🔄 Система будет работать с fallback памятью")
     
-    def _get_user_lock(self, chat_id: str) -> threading.Lock:
+    def _get_user_rw_lock(self, chat_id: str) -> ReadWriteLock:
         """
-        Получает блокировку для конкретного пользователя.
-        Это критически важно для предотвращения race conditions
-        в многопоточной среде.
+        ИСПРАВЛЕНО: Получает Read-Write lock для пользователя с timeout protection
         """
-        chat_id = str(chat_id)
         with self.user_locks_lock:
-            if chat_id not in self.user_locks:
-                self.user_locks[chat_id] = threading.Lock()
-            return self.user_locks[chat_id]
+            if chat_id not in self.user_rw_locks:
+                self.user_rw_locks[chat_id] = ReadWriteLock()
+                
+                # Cleanup старых locks для предотвращения memory leak
+                if len(self.user_rw_locks) > config.MAX_FALLBACK_USERS:
+                    old_chat_ids = list(self.user_rw_locks.keys())[:len(self.user_rw_locks)//4]
+                    for old_id in old_chat_ids:
+                        del self.user_rw_locks[old_id]
+                    self.logger.info(f"🧹 Очищены старые user locks: {len(old_chat_ids)}")
+            
+            return self.user_rw_locks[chat_id]
     
-    def _normalize_chat_id(self, chat_id) -> str:
-        """Нормализует chat_id для консистентного использования"""
-        if chat_id is None:
-            return ""
-        return str(chat_id)
+    def _normalize_chat_id(self, chat_id: str) -> str:
+        """Нормализует chat_id для consistent доступа"""
+        return str(chat_id).strip() if chat_id else ""
     
     def get_dialogue_state(self, chat_id: str) -> str:
         """
-        Получает текущее состояние диалога для пользователя.
-        
-        Алгоритм:
-        1. Пытаемся получить из Redis
-        2. Если Redis недоступен или состояние не найдено, анализируем историю
-        3. Если история пустая, возвращаем 'greeting'
+        THREAD-SAFE получение состояния диалога с concurrent read support
         """
         chat_id = self._normalize_chat_id(chat_id)
         if not chat_id:
             return 'greeting'
         
-        user_lock = self._get_user_lock(chat_id)
-        with user_lock:
-            # Пытаемся получить из Redis
-            if self.redis_available:
-                try:
-                    state_key = f"state:{chat_id}"
-                    state = self.redis_client.get(state_key)
-                    if state and state in self.DIALOGUE_STATES:
-                        return state
-                except Exception as e:
-                    self.logger.warning(f"Ошибка чтения состояния из Redis: {e}")
-            
-            # Если не нашли в Redis, анализируем историю сообщений
-            history = self._get_conversation_history_internal(chat_id)
-            return self._infer_state_from_history(history)
-    
-    def _infer_state_from_history(self, history: List[str]) -> str:
-        """
-        Выводит состояние диалога на основе истории сообщений.
-        Использует эвристический анализ ключевых слов.
-        """
-        if not history:
-            return 'greeting'
+        user_rw_lock = self._get_user_rw_lock(chat_id)
         
-        # Анализируем последние 4 сообщения пользователя
-        user_messages = [msg for msg in history if msg.startswith("Пользователь:")][-4:]
-        recent_text = ' '.join(user_messages).lower()
-        
-        # Ищем ключевые слова для определения состояния
-        for state, keywords in self.STATE_KEYWORDS.items():
-            if any(keyword in recent_text for keyword in keywords):
-                self.logger.info(f"Определено состояние '{state}' по ключевым словам")
+        try:
+            with user_rw_lock.acquire_read(timeout=3.0):
+                state = self._get_dialogue_state_internal(chat_id)
+                with self.stats_lock:
+                    self.performance_stats['successful_reads'] += 1
                 return state
-        
-        # Fallback логика на основе длины истории
-        if len(history) < 4:
+                
+        except TimeoutError:
+            # Graceful degradation при timeout
+            with self.stats_lock:
+                self.performance_stats['timeout_errors'] += 1
+            self.logger.warning(f"Read timeout for chat_id: {chat_id}, using default state")
             return 'greeting'
-        elif len(history) < 8:
-            return 'fact_finding'
-        else:
-            return 'problem_solving'
+        except Exception as e:
+            self.logger.error(f"Error getting dialogue state: {e}")
+            return 'greeting'
     
-    def update_dialogue_state(self, chat_id: str, new_state: str):
+    def _get_dialogue_state_internal(self, chat_id: str) -> str:
+        """Внутренний метод получения состояния (без дополнительной блокировки)"""
+        if self.redis_available:
+            try:
+                state_key = f"state:{chat_id}"
+                state = self.redis_client.get(state_key)
+                return state if state in self.DIALOGUE_STATES else 'greeting'
+            except Exception as e:
+                self.logger.warning(f"Redis state read error: {e}")
+                with self.stats_lock:
+                    self.performance_stats['redis_errors'] += 1
+        
+        # Fallback на локальную память
+        with self.fallback_memory_lock:
+            user_data = self.fallback_memory.get(chat_id, {})
+            return user_data.get('state', 'greeting')
+    
+    def set_dialogue_state(self, chat_id: str, state: str):
         """
-        Обновляет состояние диалога для пользователя.
-        Thread-safe операция с записью в Redis и fallback.
+        THREAD-SAFE установка состояния диалога
         """
         chat_id = self._normalize_chat_id(chat_id)
-        if not chat_id or new_state not in self.DIALOGUE_STATES:
-            self.logger.warning(f"Невалидные параметры состояния: {chat_id}, {new_state}")
+        if not chat_id or state not in self.DIALOGUE_STATES:
             return
         
-        user_lock = self._get_user_lock(chat_id)
-        with user_lock:
-            if self.redis_available:
-                try:
-                    state_key = f"state:{chat_id}"
-                    self.redis_client.set(state_key, new_state, ex=config.CONVERSATION_EXPIRATION_SECONDS)
-                    self.logger.info(f"Состояние диалога обновлено: {chat_id} -> {new_state}")
-                except Exception as e:
-                    self.logger.error(f"Ошибка записи состояния в Redis: {e}")
+        user_rw_lock = self._get_user_rw_lock(chat_id)
+        
+        try:
+            with user_rw_lock.acquire_write(timeout=3.0):
+                self._set_dialogue_state_internal(chat_id, state)
+                with self.stats_lock:
+                    self.performance_stats['successful_writes'] += 1
+                    
+        except TimeoutError:
+            with self.stats_lock:
+                self.performance_stats['timeout_errors'] += 1
+            self.logger.warning(f"Write timeout for chat_id: {chat_id}, state: {state}")
+        except Exception as e:
+            self.logger.error(f"Error setting dialogue state: {e}")
+    
+    def _set_dialogue_state_internal(self, chat_id: str, state: str):
+        """Внутренний метод установки состояния"""
+        if self.redis_available:
+            try:
+                state_key = f"state:{chat_id}"
+                self.redis_client.setex(state_key, config.CONVERSATION_EXPIRATION_SECONDS, state)
+                return
+            except Exception as e:
+                self.logger.warning(f"Redis state write error: {e}")
+                with self.stats_lock:
+                    self.performance_stats['redis_errors'] += 1
+        
+        # Fallback на локальную память
+        with self.fallback_memory_lock:
+            if chat_id not in self.fallback_memory:
+                self.fallback_memory[chat_id] = {}
+            self.fallback_memory[chat_id]['state'] = state
+            self.fallback_memory[chat_id]['last_update'] = time.time()
+            
+            with self.stats_lock:
+                self.performance_stats['fallback_usage'] += 1
     
     def get_conversation_history(self, chat_id: str) -> List[str]:
         """
-        Получает историю диалога для пользователя.
-        Возвращает список строк в формате ["Пользователь: ...", "Ассистент: ..."]
+        THREAD-SAFE получение истории диалога с concurrent read support
         """
         chat_id = self._normalize_chat_id(chat_id)
         if not chat_id:
             return []
         
-        user_lock = self._get_user_lock(chat_id)
-        with user_lock:
-            return self._get_conversation_history_internal(chat_id)
+        user_rw_lock = self._get_user_rw_lock(chat_id)
+        
+        try:
+            with user_rw_lock.acquire_read(timeout=3.0):
+                history = self._get_conversation_history_internal(chat_id)
+                with self.stats_lock:
+                    self.performance_stats['successful_reads'] += 1
+                return history
+                
+        except TimeoutError:
+            with self.stats_lock:
+                self.performance_stats['timeout_errors'] += 1
+            self.logger.warning(f"History read timeout for chat_id: {chat_id}")
+            return []
+        except Exception as e:
+            self.logger.error(f"Error getting conversation history: {e}")
+            return []
     
     def _get_conversation_history_internal(self, chat_id: str) -> List[str]:
-        """
-        Внутренний метод получения истории (без дополнительной блокировки).
-        Используется когда блокировка уже установлена вызывающим кодом.
-        """
+        """Внутренний метод получения истории"""
         if self.redis_available:
             try:
                 history_key = f"history:{chat_id}"
                 # Redis возвращает в обратном порядке, исправляем
                 return self.redis_client.lrange(history_key, 0, -1)[::-1]
             except Exception as e:
-                self.logger.warning(f"Ошибка чтения истории из Redis: {e}")
+                self.logger.warning(f"Redis history read error: {e}")
+                with self.stats_lock:
+                    self.performance_stats['redis_errors'] += 1
         
         # Fallback на локальную память
         with self.fallback_memory_lock:
-            return self.fallback_memory.get(chat_id, [])
+            user_data = self.fallback_memory.get(chat_id, {})
+            return user_data.get('history', [])
     
     def update_conversation_history(self, chat_id: str, user_message: str, ai_response: str):
         """
-        Обновляет историю диалога, добавляя новое сообщение пользователя и ответ AI.
-        
-        Алгоритм:
-        1. Очищаем токены действий из ответа AI (для чистой истории)
-        2. Добавляем сообщения в Redis/fallback
-        3. Обрезаем историю до максимального размера
-        4. Устанавливаем время жизни записи
+        THREAD-SAFE обновление истории диалога
         """
         chat_id = self._normalize_chat_id(chat_id)
         if not chat_id or not user_message:
@@ -226,110 +396,109 @@ class ConversationManager:
         # Очищаем токены действий перед сохранением
         clean_response = ai_response.replace("[ACTION:SEND_LESSON_LINK]", "[ССЫЛКА_НА_УРОК]")
         
-        user_lock = self._get_user_lock(chat_id)
-        with user_lock:
-            timestamp = datetime.now().isoformat()
-            
-            if self.redis_available:
-                try:
-                    history_key = f"history:{chat_id}"
-                    metadata_key = f"metadata:{chat_id}"
+        user_rw_lock = self._get_user_rw_lock(chat_id)
+        
+        try:
+            with user_rw_lock.acquire_write(timeout=3.0):
+                self._update_conversation_history_internal(chat_id, user_message, clean_response)
+                with self.stats_lock:
+                    self.performance_stats['successful_writes'] += 1
                     
-                    # Используем pipeline для атомарности операций
-                    pipe = self.redis_client.pipeline()
-                    pipe.lpush(history_key, f"Ассистент: {clean_response}")
-                    pipe.lpush(history_key, f"Пользователь: {user_message}")
-                    pipe.ltrim(history_key, 0, (config.CONVERSATION_MEMORY_SIZE * 2) - 1)
-                    pipe.expire(history_key, config.CONVERSATION_EXPIRATION_SECONDS)
-                    
-                    # Сохраняем метаданные
-                    metadata = {
-                        "last_activity": timestamp,
-                        "message_count": len(self._get_conversation_history_internal(chat_id)) // 2 + 1
-                    }
-                    pipe.hset(metadata_key, mapping=metadata)
-                    pipe.expire(metadata_key, config.CONVERSATION_EXPIRATION_SECONDS)
-                    
-                    pipe.execute()
-                    
-                except Exception as e:
-                    self.logger.error(f"Ошибка записи истории в Redis: {e}")
-                    self._update_fallback_memory(chat_id, user_message, clean_response)
-            else:
-                self._update_fallback_memory(chat_id, user_message, clean_response)
+        except TimeoutError:
+            with self.stats_lock:
+                self.performance_stats['timeout_errors'] += 1
+            self.logger.warning(f"History update timeout for chat_id: {chat_id}")
+        except Exception as e:
+            self.logger.error(f"Error updating conversation history: {e}")
+    
+    def _update_conversation_history_internal(self, chat_id: str, user_message: str, ai_response: str):
+        """Внутренний метод обновления истории"""
+        timestamp = datetime.now().isoformat()
+        
+        if self.redis_available:
+            try:
+                history_key = f"history:{chat_id}"
+                metadata_key = f"metadata:{chat_id}"
+                
+                # Используем pipeline для атомарности операций
+                pipe = self.redis_client.pipeline()
+                pipe.lpush(history_key, f"Ассистент: {ai_response}")
+                pipe.lpush(history_key, f"Пользователь: {user_message}")
+                pipe.ltrim(history_key, 0, (config.CONVERSATION_MEMORY_SIZE * 2) - 1)
+                pipe.expire(history_key, config.CONVERSATION_EXPIRATION_SECONDS)
+                
+                # Сохраняем метаданные
+                metadata = {
+                    "last_activity": timestamp,
+                    "message_count": len(self._get_conversation_history_internal(chat_id)) // 2 + 1
+                }
+                pipe.hset(metadata_key, mapping=metadata)
+                pipe.expire(metadata_key, config.CONVERSATION_EXPIRATION_SECONDS)
+                
+                pipe.execute()
+                return
+                
+            except Exception as e:
+                self.logger.error(f"Redis history update error: {e}")
+                with self.stats_lock:
+                    self.performance_stats['redis_errors'] += 1
+        
+        # Fallback на локальную память
+        self._update_fallback_memory(chat_id, user_message, ai_response)
     
     def _update_fallback_memory(self, chat_id: str, user_message: str, ai_response: str):
-        """
-        Обновляет fallback память когда Redis недоступен.
-        Включает автоматическую очистку для предотвращения переполнения памяти.
-        """
+        """Thread-safe обновление fallback памяти"""
         with self.fallback_memory_lock:
             if chat_id not in self.fallback_memory:
-                self.fallback_memory[chat_id] = []
+                self.fallback_memory[chat_id] = {'history': [], 'state': 'greeting'}
             
-            self.fallback_memory[chat_id].append(f"Пользователь: {user_message}")
-            self.fallback_memory[chat_id].append(f"Ассистент: {ai_response}")
+            history = self.fallback_memory[chat_id]['history']
+            history.append(f"Пользователь: {user_message}")
+            history.append(f"Ассистент: {ai_response}")
             
             # Обрезаем до максимального размера
             max_lines = config.CONVERSATION_MEMORY_SIZE * 2
-            if len(self.fallback_memory[chat_id]) > max_lines:
-                self.fallback_memory[chat_id] = self.fallback_memory[chat_id][-max_lines:]
+            if len(history) > max_lines:
+                history[:] = history[-max_lines:]
+            
+            self.fallback_memory[chat_id]['last_update'] = time.time()
+            
+            with self.stats_lock:
+                self.performance_stats['fallback_usage'] += 1
             
             # Периодическая очистка памяти
             self._cleanup_fallback_memory()
     
     def _cleanup_fallback_memory(self):
-        """
-        Очищает fallback память от лишних записей для предотвращения переполнения.
-        Вызывается автоматически при обновлении истории.
-        """
+        """Thread-safe очистка fallback памяти"""
         if len(self.fallback_memory) > config.MAX_FALLBACK_USERS:
             # Удаляем половину самых старых записей
-            old_keys = list(self.fallback_memory.keys())[:len(self.fallback_memory)//2]
-            for key in old_keys:
-                del self.fallback_memory[key]
-            self.logger.info(f"Очищена fallback память: удалено {len(old_keys)} старых записей")
-    
-    def _clear_all_memory(self):
-        """
-        Очищает всю память диалогов (Redis + fallback).
-        Используется для тестирования при CLEAR_MEMORY_ON_START=true.
-        """
-        cleared_redis = 0
-        cleared_fallback = 0
-        
-        # Очищаем Redis
-        if self.redis_available:
-            try:
-                # Находим все ключи связанные с диалогами
-                keys_to_delete = []
-                for pattern in ['history:*', 'state:*', 'metadata:*']:
-                    keys = self.redis_client.keys(pattern)
-                    keys_to_delete.extend(keys)
-                
-                if keys_to_delete:
-                    cleared_redis = self.redis_client.delete(*keys_to_delete)
-                    self.logger.info(f"Очищено {cleared_redis} ключей из Redis")
-            except Exception as e:
-                self.logger.warning(f"Ошибка очистки Redis: {e}")
-        
-        # Очищаем fallback память
-        with self.fallback_memory_lock:
-            cleared_fallback = len(self.fallback_memory)
-            self.fallback_memory.clear()
-        
-        if cleared_fallback > 0:
-            self.logger.info(f"Очищено {cleared_fallback} записей из fallback памяти")
+            current_time = time.time()
+            old_entries = []
+            
+            for chat_id, data in self.fallback_memory.items():
+                last_update = data.get('last_update', 0)
+                if current_time - last_update > 3600:  # Старше часа
+                    old_entries.append(chat_id)
+            
+            # Если недостаточно старых записей, удаляем самые старые
+            if len(old_entries) < len(self.fallback_memory) // 4:
+                sorted_entries = sorted(
+                    self.fallback_memory.items(),
+                    key=lambda x: x[1].get('last_update', 0)
+                )
+                old_entries.extend([chat_id for chat_id, _ in sorted_entries[:len(self.fallback_memory)//4]])
+            
+            for chat_id in old_entries[:len(self.fallback_memory)//2]:
+                del self.fallback_memory[chat_id]
+            
+            if old_entries:
+                self.logger.info(f"🧹 Очищена fallback память: удалено {len(old_entries)} записей")
     
     def analyze_message_for_state_transition(self, user_message: str, current_state: str) -> str:
         """
         Анализирует сообщение пользователя и определяет новое состояние диалога.
-        
-        Алгоритм:
-        1. Проверяем прямые запросы урока (-> closing)
-        2. Анализируем ключевые слова
-        3. Для коротких сообщений используем простую логику
-        4. Для длинных сообщений используем более сложный анализ
+        Этот метод не требует блокировок, так как он stateless.
         """
         if not user_message:
             return current_state
@@ -362,21 +531,66 @@ class ConversationManager:
     
     def get_conversation_stats(self, chat_id: str) -> Dict[str, Any]:
         """
-        Возвращает статистику диалога для пользователя.
-        Полезно для отладки и мониторинга.
+        Thread-safe возвращение статистики диалога
         """
         chat_id = self._normalize_chat_id(chat_id)
-        history = self.get_conversation_history(chat_id)
-        current_state = self.get_dialogue_state(chat_id)
         
-        return {
-            "chat_id": chat_id,
-            "current_state": current_state,
-            "message_count": len(history),
-            "redis_available": self.redis_available,
-            "last_messages": history[-4:] if history else []
-        }
+        try:
+            history = self.get_conversation_history(chat_id)
+            current_state = self.get_dialogue_state(chat_id)
+            
+            with self.stats_lock:
+                performance_stats = self.performance_stats.copy()
+            
+            return {
+                "chat_id": chat_id,
+                "current_state": current_state,
+                "message_count": len(history),
+                "redis_available": self.redis_available,
+                "last_messages": history[-4:] if history else [],
+                "performance_stats": performance_stats
+            }
+        except Exception as e:
+            self.logger.error(f"Error getting conversation stats: {e}")
+            return {
+                "chat_id": chat_id,
+                "error": str(e),
+                "redis_available": self.redis_available
+            }
+    
+    def _clear_all_memory(self):
+        """
+        Thread-safe очистка всей памяти диалогов
+        """
+        cleared_redis = 0
+        cleared_fallback = 0
+        
+        # Очищаем Redis
+        if self.redis_available:
+            try:
+                keys_to_delete = []
+                for pattern in ['history:*', 'state:*', 'metadata:*']:
+                    keys = self.redis_client.keys(pattern)
+                    keys_to_delete.extend(keys)
+                
+                if keys_to_delete:
+                    cleared_redis = self.redis_client.delete(*keys_to_delete)
+                    self.logger.info(f"Очищено {cleared_redis} ключей из Redis")
+            except Exception as e:
+                self.logger.warning(f"Ошибка очистки Redis: {e}")
+        
+        # Очищаем fallback память
+        with self.fallback_memory_lock:
+            cleared_fallback = len(self.fallback_memory)
+            self.fallback_memory.clear()
+        
+        # Очищаем user locks
+        with self.user_locks_lock:
+            self.user_rw_locks.clear()
+        
+        if cleared_fallback > 0:
+            self.logger.info(f"Очищено {cleared_fallback} записей из fallback памяти")
 
 
-# Создаем глобальный экземпляр менеджера диалогов
+# Создаем глобальный экземпляр thread-safe менеджера диалогов
 conversation_manager = ConversationManager()
