@@ -1,3 +1,4 @@
+
 import os
 import requests
 import google.generativeai as genai
@@ -907,20 +908,17 @@ def send_to_hubspot(user_data: Dict[str, Any]) -> bool:
 # --- ОСНОВНОЕ ПРИЛОЖЕНИЕ FLASK ---
 app = Flask(__name__)
 
+
 def send_telegram_message(chat_id: str, text: str) -> bool:
     """ИСПРАВЛЕНО: Улучшенная отправка сообщений в Telegram"""
-    
     if not text or len(text.strip()) == 0:
         logger.warning("Попытка отправить пустое сообщение")
         return False
-    
     # Ограничение длины сообщения для Telegram
     if len(text) > 4096:
         text = text[:4093] + "..."
-    
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {"chat_id": normalize_chat_id(chat_id), "text": text}
-    
     for attempt in range(3):
         try:
             response = requests.post(url, json=payload, timeout=10)
@@ -930,9 +928,39 @@ def send_telegram_message(chat_id: str, text: str) -> bool:
             logger.warning(f"Telegram API вернул статус {response.status_code}: {response.text}")
         except Exception as e:
             logger.error(f"Ошибка при отправке сообщения в Telegram (попытка {attempt + 1}/3): {e}")
-        if attempt < 2: 
+        if attempt < 2:
             time.sleep(1)
     return False
+
+# --- НОВАЯ ФУНКЦИЯ ДЛЯ ФОНОВОЙ ОБРАБОТКИ ---
+def process_message_in_background(chat_id: str, received_text: str):
+    """
+    НОВОЕ: Эта функция выполняется в отдельном потоке, чтобы не блокировать веб-сервер.
+    Она содержит всю логику, которая раньше была в webhook.
+    """
+    logger.info(f"Начало фоновой обработки для чата {chat_id}")
+    try:
+        # 1. Генерируем ответ (долгая операция)
+        ai_response, metrics = generate_response(chat_id, received_text)
+        # 2. Отправляем сгенерированный ответ пользователю
+        success = send_telegram_message(chat_id, ai_response)
+        # 3. Обновляем состояние и историю ПОСЛЕ отправки ответа
+        if success and chat_id:
+            # Получаем новый стейт из метрик
+            new_state_str = metrics.get('dialogue_state_transition', 'N/A').split(' → ')[-1]
+            if new_state_str in DIALOGUE_STATES:
+                update_dialogue_state(chat_id, new_state_str)
+            # Сохраняем историю
+            update_conversation_history(chat_id, received_text, ai_response)
+            # Логирование успеха
+            transition = metrics.get('dialogue_state_transition', 'N/A')
+            cache_status = "HIT" if metrics.get('cache_hit', False) else "MISS"
+            logger.info(f"Фоновая обработка для {chat_id} завершена: {metrics.get('total_time', 'N/A')}с, переход: {transition}, кеш: {cache_status}")
+        elif not success:
+            logger.error(f"Не удалось отправить сообщение в чат {chat_id} в фоновом режиме.")
+    except Exception as e:
+        # Критически важно логировать ошибки в потоках!
+        logger.error(f"Критическая ошибка в фоновом потоке для чата {chat_id}: {e}", exc_info=True)
 
 # --- МАРШРУТЫ FLASK ---
 @app.route('/lesson')
@@ -952,42 +980,37 @@ def get_metrics():
         "cache_size": len(RAG_CACHE)
     }
 
+
+# --- ИЗМЕНЕННЫЙ ГЛАВНЫЙ WEBHOOK ---
 @app.route('/', methods=['POST'])
 def webhook():
-    """ИСПРАВЛЕНО: Главный webhook с улучшенной обработкой ошибок и мониторингом"""
+    """
+    ИЗМЕНЕНО: Главный webhook. Теперь он НЕ блокирующий.
+    Он только принимает запрос, запускает фоновую задачу и мгновенно отвечает Telegram.
+    """
     try:
         update = request.get_json()
-        
         if not update or "message" not in update:
             return "OK", 200
-            
-        message = update["message"]
+        message = update.get("message", {})
         if "text" not in message or "chat" not in message:
             return "OK", 200
-            
         chat_id = message["chat"]["id"]
         received_text = message["text"]
-        
-        # Генерируем ответ и отправляем
-        ai_response, metrics = generate_response(chat_id, received_text)
-        success = send_telegram_message(chat_id, ai_response)
-
-        # Обновляем состояние и историю ПОСЛЕ отправки ответа
-        if chat_id:
-            new_state = metrics.get('dialogue_state_transition', 'N/A').split(' → ')[-1]
-            if new_state in DIALOGUE_STATES:
-                update_dialogue_state(chat_id, new_state)
-            update_conversation_history(chat_id, received_text, ai_response)
-
-        if success:
-            transition = metrics.get('dialogue_state_transition', 'N/A')
-            cache_status = "HIT" if metrics.get('cache_hit', False) else "MISS"
-            logger.info(f"Обработан запрос от {chat_id}: {metrics.get('total_time', 'N/A')}с, переход: {transition}, кеш: {cache_status}")
-
+        # --- КЛЮЧЕВОЕ ИЗМЕНЕНИЕ ---
+        # Создаем новый поток, который будет выполнять нашу тяжелую функцию
+        thread = threading.Thread(
+            target=process_message_in_background,
+            args=(chat_id, received_text)
+        )
+        # Запускаем поток (он начнет выполняться в фоне)
+        thread.start()
+        # -------------------------
+        logger.info(f"Запрос от {chat_id} принят. Запущена фоновая обработка.")
+        # Мгновенно возвращаем ответ Telegram, не дожидаясь завершения потока
         return "OK", 200
-        
     except Exception as e:
-        logger.error(f"Ошибка в webhook: {e}")
+        logger.error(f"Ошибка в webhook (до запуска потока): {e}")
         return "Error", 500
 
 
