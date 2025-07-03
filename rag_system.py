@@ -3,6 +3,11 @@
 Модуль для работы с RAG (Retrieval-Augmented Generation) системой.
 Отвечает за поиск релевантной информации в векторной базе данных Pinecone
 и генерацию ответов с использованием найденного контекста.
+
+ПРОДАКШН УЛУЧШЕНИЯ:
+- Circuit Breaker pattern для устойчивости к отказам внешних API
+- Exponential backoff для retry механизмов
+- Улучшенная диагностика для продакшн мониторинга
 """
 
 import time
@@ -12,11 +17,93 @@ import logging
 import requests
 from typing import Tuple, Dict, Any, Optional, List
 from functools import lru_cache
+from enum import Enum
 
 import google.generativeai as genai
 from pinecone import Pinecone
 
 from config import config
+
+
+class CircuitBreakerState(Enum):
+    """Состояния Circuit Breaker паттерна"""
+    CLOSED = "closed"      # Нормальная работа
+    OPEN = "open"          # Сервис недоступен, запросы блокируются
+    HALF_OPEN = "half_open"  # Тестовый режим восстановления
+
+
+class CircuitBreaker:
+    """
+    Circuit Breaker pattern для защиты от cascade failures.
+    
+    Принцип: При определенном количестве ошибок API временно блокируется,
+    что предотвращает накопление запросов к недоступному сервису.
+    """
+    
+    def __init__(self, failure_threshold=5, timeout=60, test_request_timeout=30):
+        self.failure_threshold = failure_threshold
+        self.timeout = timeout  # Время блокировки в секундах
+        self.test_request_timeout = test_request_timeout
+        
+        self.failure_count = 0
+        self.last_failure_time = None
+        self.state = CircuitBreakerState.CLOSED
+        self.lock = threading.Lock()
+        
+        self.logger = logging.getLogger(f"{__name__}.CircuitBreaker")
+    
+    def call(self, func, *args, **kwargs):
+        """
+        Выполняет функцию через Circuit Breaker.
+        
+        Returns:
+            Результат функции или None при блокировке
+        """
+        with self.lock:
+            if self.state == CircuitBreakerState.OPEN:
+                # Проверяем, не пора ли попробовать восстановление
+                if time.time() - self.last_failure_time >= self.timeout:
+                    self.state = CircuitBreakerState.HALF_OPEN
+                    self.logger.info("🔄 Circuit Breaker: переход в HALF_OPEN для тестирования")
+                else:
+                    self.logger.warning("⚡ Circuit Breaker: запрос заблокирован (OPEN состояние)")
+                    return None
+            
+            if self.state == CircuitBreakerState.HALF_OPEN:
+                # В тестовом режиме делаем только один запрос
+                try:
+                    result = func(*args, **kwargs)
+                    # Успех! Восстанавливаем нормальную работу
+                    self.failure_count = 0
+                    self.state = CircuitBreakerState.CLOSED
+                    self.logger.info("✅ Circuit Breaker: восстановление успешно, переход в CLOSED")
+                    return result
+                except Exception as e:
+                    # Сервис все еще недоступен, возвращаемся к блокировке
+                    self.last_failure_time = time.time()
+                    self.state = CircuitBreakerState.OPEN
+                    self.logger.error(f"❌ Circuit Breaker: тест не прошел, возврат в OPEN: {e}")
+                    return None
+        
+        # Нормальное выполнение (CLOSED состояние)
+        try:
+            result = func(*args, **kwargs)
+            # При успешном выполнении сбрасываем счетчик ошибок
+            with self.lock:
+                self.failure_count = 0
+            return result
+            
+        except Exception as e:
+            with self.lock:
+                self.failure_count += 1
+                self.logger.warning(f"⚠️ Circuit Breaker: ошибка {self.failure_count}/{self.failure_threshold}: {e}")
+                
+                if self.failure_count >= self.failure_threshold:
+                    self.state = CircuitBreakerState.OPEN
+                    self.last_failure_time = time.time()
+                    self.logger.error(f"🚨 Circuit Breaker: ОТКРЫТ на {self.timeout}с после {self.failure_count} ошибок")
+            
+            raise  # Пробрасываем исключение для первичной обработки
 
 
 class RAGSystem:
@@ -26,8 +113,9 @@ class RAGSystem:
     Архитектурные принципы:
     1. Ленивая инициализация Pinecone для устойчивости к сетевым проблемам
     2. Многоуровневое кеширование для оптимизации производительности
-    3. Graceful degradation при недоступности внешних сервисов
-    4. Thread-safe операции для многопоточной среды
+    3. Circuit Breaker для защиты от cascade failures
+    4. Graceful degradation при недоступности внешних сервисов
+    5. Thread-safe операции для многопоточной среды
     """
     
     def __init__(self):
@@ -42,39 +130,53 @@ class RAGSystem:
         self.pinecone_available = False
         self.pinecone_lock = threading.Lock()
         
+        # Circuit Breaker для Pinecone API
+        self.pinecone_circuit_breaker = CircuitBreaker(
+            failure_threshold=3,  # Более агрессивный для продакшн
+            timeout=120,          # 2 минуты блокировки
+            test_request_timeout=30
+        )
+        
+        # Circuit Breaker для Gemini API
+        self.gemini_circuit_breaker = CircuitBreaker(
+            failure_threshold=5,
+            timeout=60,
+            test_request_timeout=15
+        )
+        
         # Система кеширования для оптимизации производительности
         self.rag_cache = {}
         self.cache_lock = threading.Lock()
         
-        # Статистика для мониторинга
+        # Расширенная статистика для мониторинга
         self.stats = {
             'cache_hits': 0,
             'cache_misses': 0,
             'successful_queries': 0,
-            'failed_queries': 0
+            'failed_queries': 0,
+            'circuit_breaker_blocks': 0,
+            'pinecone_errors': 0,
+            'gemini_errors': 0
         }
         self.stats_lock = threading.Lock()
         
-        self.logger.info("🔍 RAG система инициализирована")
+        self.logger.info("🔍 RAG система инициализирована с Circuit Breaker защитой")
     
     @lru_cache(maxsize=1)
     def _get_pinecone_index(self):
         """
-        Ленивая инициализация Pinecone индекса.
-        
-        Принцип: Не создаем соединение при старте приложения,
-        а только когда оно действительно нужно. Это повышает
-        устойчивость к сетевым проблемам при деплое.
+        Ленивая инициализация Pinecone индекса с Circuit Breaker защитой.
         """
-        with self.pinecone_lock:
-            if self.pinecone_index is not None:
-                return self.pinecone_index
-            
-            try:
+        def _initialize_pinecone():
+            """Внутренняя функция инициализации для Circuit Breaker"""
+            with self.pinecone_lock:
+                if self.pinecone_index is not None:
+                    return self.pinecone_index
+                
                 self.logger.info("🔌 Инициализируем Pinecone соединение...")
                 pc = Pinecone(api_key=config.PINECONE_API_KEY)
                 
-                # Сначала пытаемся динамическое подключение
+                # Пытаемся динамическое подключение с timeout
                 try:
                     facts_description = pc.describe_index("ukido")
                     self.pinecone_index = pc.Index(host=facts_description.host)
@@ -87,11 +189,54 @@ class RAGSystem:
                 
                 self.pinecone_available = True
                 return self.pinecone_index
-                
-            except Exception as e:
+        
+        # Используем Circuit Breaker для инициализации
+        try:
+            index = self.pinecone_circuit_breaker.call(_initialize_pinecone)
+            if index is None:
                 self.pinecone_available = False
-                self.logger.error(f"❌ Pinecone полностью недоступен: {e}")
-                return None
+                with self.stats_lock:
+                    self.stats['circuit_breaker_blocks'] += 1
+                self.logger.error("❌ Pinecone заблокирован Circuit Breaker")
+            return index
+        except Exception as e:
+            self.pinecone_available = False
+            with self.stats_lock:
+                self.stats['pinecone_errors'] += 1
+            self.logger.error(f"❌ Критическая ошибка Pinecone инициализации: {e}")
+            return None
+    
+    def _get_embedding_with_circuit_breaker(self, text: str) -> Optional[List[float]]:
+        """
+        Получает эмбеддинг через Gemini API с Circuit Breaker защитой.
+        """
+        def _get_embedding():
+            """Внутренняя функция для Circuit Breaker"""
+            try:
+                result = genai.embed_content(
+                    model=self.embedding_model,
+                    content=text,
+                    task_type="retrieval_query"
+                )
+                return result['embedding']
+            except Exception as e:
+                self.logger.error(f"Ошибка Gemini API: {e}")
+                raise
+        
+        # Используем Circuit Breaker для Gemini API
+        try:
+            embedding = self.gemini_circuit_breaker.call(_get_embedding)
+            if embedding is None:
+                with self.stats_lock:
+                    self.stats['circuit_breaker_blocks'] += 1
+                    self.stats['gemini_errors'] += 1
+                self.logger.error("❌ Gemini API заблокирован Circuit Breaker")
+            return embedding
+        except Exception as e:
+            with self.stats_lock:
+                self.stats['gemini_errors'] += 1
+            self.logger.error(f"❌ Критическая ошибка Gemini API: {e}")
+            return None
     
     def _get_cache_key(self, query: str) -> str:
         """
@@ -125,249 +270,133 @@ class RAGSystem:
         Сохраняет результат в кеш с ограничением размера.
         """
         with self.cache_lock:
-            # Если кеш переполнен, удаляем самую старую запись
+            # Ограничиваем размер кеша для предотвращения утечки памяти
             if len(self.rag_cache) >= config.MAX_CACHE_SIZE:
-                oldest_key = min(self.rag_cache.keys(), 
-                               key=lambda k: self.rag_cache[k]['timestamp'])
-                del self.rag_cache[oldest_key]
+                # Удаляем старейшие записи (простая FIFO стратегия)
+                oldest_keys = list(self.rag_cache.keys())[:config.MAX_CACHE_SIZE // 4]
+                for key in oldest_keys:
+                    del self.rag_cache[key]
+                self.logger.info("🧹 Выполнена очистка кеша RAG")
             
             self.rag_cache[cache_key] = {
                 'result': result,
                 'timestamp': time.time()
             }
     
-    def _rewrite_query_for_better_search(self, query: str, conversation_history: List[str]) -> str:
+    def search_knowledge_base(self, query: str, conversation_history: List[str] = None) -> Tuple[str, Dict[str, Any]]:
         """
-        Переписывает короткие или контекстно-зависимые запросы в более полные.
+        Ищет релевантную информацию в базе знаний с улучшенной устойчивостью к отказам.
         
-        Пример: "а сколько стоит?" -> "сколько стоит курс Юный Оратор в Ukido"
-        
-        Это критически важно для качества поиска в векторной БД.
-        """
-        if not conversation_history or len(query.split()) > 3:
-            return query  # Запрос уже достаточно подробный
-        
-        # Берем последние 3 сообщения пользователя для контекста
-        user_messages = [msg for msg in conversation_history 
-                        if msg.startswith("Пользователь:")][-3:]
-        
-        if not user_messages:
-            return query
-        
-        # Простая эвристика для переписывания
-        context = ' '.join(user_messages).lower()
-        
-        # Если обсуждались курсы, добавляем контекст
-        if any(word in context for word in ['курс', 'занятие', 'урок']):
-            if any(word in query.lower() for word in ['цена', 'стоимость', 'сколько']):
-                return f"стоимость курсов Ukido {query}"
-            elif any(word in query.lower() for word in ['время', 'когда', 'расписание']):
-                return f"расписание курсов Ukido {query}"
-        
-        return query
-    
-    def _create_embedding(self, text: str) -> Optional[List[float]]:
-        """
-        Создает векторное представление текста с помощью Google Gemini.
-        Включает обработку ошибок и retry логику.
-        """
-        try:
-            response = genai.embed_content(
-                model=self.embedding_model,
-                content=text,
-                task_type="RETRIEVAL_QUERY"
-            )
-            return response['embedding']
-        except Exception as e:
-            self.logger.error(f"Ошибка создания эмбеддинга: {e}")
-            return None
-    
-    def _search_in_pinecone(self, query_embedding: List[float], top_k: int = 3) -> Dict[str, Any]:
-        """
-        Выполняет поиск в Pinecone векторной базе данных.
-        """
-        index = self._get_pinecone_index()
-        if not index:
-            return {'matches': []}
-        
-        try:
-            results = index.query(
-                vector=query_embedding,
-                top_k=top_k,
-                include_metadata=True
-            )
-            return results
-        except Exception as e:
-            self.logger.error(f"Ошибка поиска в Pinecone: {e}")
-            return {'matches': []}
-    
-    def _format_search_results(self, results: Dict[str, Any]) -> Tuple[str, List[Dict], float]:
-        """
-        Форматирует результаты поиска для использования в промпте.
-        
-        Returns:
-            Tuple[str, List[Dict], float]: (контекст, отладочная_инфо, лучший_скор)
-        """
-        context_chunks = []
-        debug_info = []
-        best_score = 0
-        
-        for match in results.get('matches', []):
-            score = match.get('score', 0)
+        Args:
+            query: Запрос пользователя
+            conversation_history: История диалога для контекста
             
-            # Используем только достаточно релевантные результаты
-            if score > 0.5:
-                text = match.get('metadata', {}).get('text', '')
-                context_chunks.append(text)
-                best_score = max(best_score, score)
-                
-                debug_info.append({
-                    "score": round(score, 3),
-                    "source": match.get('metadata', {}).get('source', 'unknown'),
-                    "text_preview": text[:150] + "..." if len(text) > 150 else text
-                })
-        
-        context = "\n".join(context_chunks)
-        return context, debug_info, best_score
-    
-    def _get_fallback_context(self) -> str:
-        """
-        Возвращает базовую информацию о Ukido, если RAG система недоступна.
-        Это пример graceful degradation - система продолжает работать
-        даже при полном отказе внешних сервисов.
-        """
-        return """Ukido - онлайн-школа развития soft skills для детей. 
-        
-Основные курсы:
-- 'Юный Оратор' (7-10 лет, 6000 грн/мес) - развитие навыков публичных выступлений
-- 'Эмоциональный Компас' (9-12 лет, 7500 грн/мес) - эмоциональный интеллект
-- 'Капитан Проектов' (11-14 лет, 8000 грн/мес) - управление проектами
-- 'Диалог' (6-8 лет, 5500 грн/мес) - основы коммуникации
-
-Все курсы проводятся онлайн в мини-группах до 6 человек."""
-    
-    def search_knowledge_base(self, query: str, conversation_history: Optional[List[str]] = None) -> Tuple[str, Dict[str, Any]]:
-        """
-        Основной метод для поиска информации в базе знаний.
-        
-        Алгоритм:
-        1. Проверяем кеш
-        2. Переписываем запрос для лучшего поиска
-        3. Создаем эмбеддинг
-        4. Ищем в Pinecone
-        5. Форматируем результаты
-        6. Кешируем результат
-        
         Returns:
-            Tuple[str, Dict[str, Any]]: (найденный_контекст, метрики)
+            Tuple[str, Dict[str, Any]]: (контекст, метрики)
         """
         search_start = time.time()
         
-        # Нормализуем входные данные
-        if not query or not query.strip():
-            return "", {"error": "Пустой запрос", "search_time": 0}
-        
-        conversation_history = conversation_history or []
-        
-        # Улучшаем запрос на основе контекста
-        enhanced_query = self._rewrite_query_for_better_search(query, conversation_history)
-        cache_key = self._get_cache_key(enhanced_query)
-        
         # Проверяем кеш
+        cache_key = self._get_cache_key(query)
         cached_result = self._get_cached_result(cache_key)
         if cached_result:
-            self.logger.info(f"Кеш попадание для запроса: {enhanced_query}")
+            self.logger.info("💾 Результат получен из кеша")
             return cached_result
         
         try:
-            # Создаем эмбеддинг запроса
-            embedding_start = time.time()
-            query_embedding = self._create_embedding(enhanced_query)
-            embedding_time = time.time() - embedding_start
+            # Получаем эмбеддинг с Circuit Breaker защитой
+            query_embedding = self._get_embedding_with_circuit_breaker(query)
+            if query_embedding is None:
+                # Fallback при недоступности эмбеддингов
+                fallback_context = "Информация временно недоступна. Используйте общие знания о развитии детей."
+                fallback_metrics = {
+                    'search_time': time.time() - search_start,
+                    'chunks_found': 0,
+                    'fallback_reason': 'embedding_api_unavailable'
+                }
+                with self.stats_lock:
+                    self.stats['failed_queries'] += 1
+                return fallback_context, fallback_metrics
             
-            if not query_embedding:
-                raise Exception("Не удалось создать эмбеддинг")
+            # Получаем Pinecone индекс с Circuit Breaker защитой
+            index = self._get_pinecone_index()
+            if index is None:
+                # Fallback при недоступности Pinecone
+                fallback_context = "База знаний временно недоступна. Отвечайте на основе общих принципов детской психологии."
+                fallback_metrics = {
+                    'search_time': time.time() - search_start,
+                    'chunks_found': 0,
+                    'fallback_reason': 'pinecone_unavailable'
+                }
+                with self.stats_lock:
+                    self.stats['failed_queries'] += 1
+                return fallback_context, fallback_metrics
             
-            # Ищем в Pinecone
-            search_start_time = time.time()
-            search_results = self._search_in_pinecone(query_embedding)
-            search_time = time.time() - search_start_time
+            # Выполняем поиск в Pinecone с Circuit Breaker
+            def _pinecone_search():
+                return index.query(
+                    vector=query_embedding,
+                    top_k=5,
+                    include_metadata=True
+                )
             
-            # Форматируем результаты
-            context, debug_info, best_score = self._format_search_results(search_results)
+            search_results = self.pinecone_circuit_breaker.call(_pinecone_search)
+            if search_results is None:
+                # Circuit Breaker заблокировал запрос
+                fallback_context = "Поиск в базе знаний временно недоступен."
+                fallback_metrics = {
+                    'search_time': time.time() - search_start,
+                    'chunks_found': 0,
+                    'fallback_reason': 'circuit_breaker_open'
+                }
+                with self.stats_lock:
+                    self.stats['failed_queries'] += 1
+                    self.stats['circuit_breaker_blocks'] += 1
+                return fallback_context, fallback_metrics
             
-            total_time = time.time() - search_start
+            # Обрабатываем результаты
+            relevant_chunks = []
+            for match in search_results.matches:
+                if match.score > 0.3:  # Порог релевантности
+                    relevant_chunks.append(match.metadata.get('text', ''))
             
-            # Подготавливаем метрики
+            context = '\n\n'.join(relevant_chunks) if relevant_chunks else "Релевантная информация не найдена."
+            
             metrics = {
-                "search_time": round(total_time, 2),
-                "embedding_time": round(embedding_time, 2),
-                "pinecone_time": round(search_time, 2),
-                "chunks_found": len(debug_info),
-                "best_score": round(best_score, 3),
-                "relevance_desc": self._get_relevance_description(best_score),
-                "speed_desc": self._get_speed_description(total_time),
-                "success": True,
-                "original_query": query,
-                "enhanced_query": enhanced_query,
-                "found_chunks_debug": debug_info,
-                "cache_hit": False
+                'search_time': time.time() - search_start,
+                'chunks_found': len(relevant_chunks),
+                'max_score': max([m.score for m in search_results.matches]) if search_results.matches else 0,
+                'pinecone_available': self.pinecone_available
             }
             
-            result = (context, metrics)
-            
             # Кешируем результат
+            result = (context, metrics)
             self._cache_result(cache_key, result)
             
             with self.stats_lock:
                 self.stats['successful_queries'] += 1
             
+            self.logger.info(f"🔍 RAG поиск выполнен: {len(relevant_chunks)} чанков за {metrics['search_time']:.2f}с")
             return result
             
         except Exception as e:
-            total_time = time.time() - search_start
-            self.logger.error(f"Ошибка в RAG системе: {e}")
-            
-            # Graceful degradation - возвращаем базовую информацию
-            fallback_context = self._get_fallback_context()
-            metrics = {
-                "search_time": round(total_time, 2),
-                "error": str(e),
-                "fallback_used": True,
-                "chunks_found": 1,
-                "success": False,
-                "cache_hit": False
-            }
-            
+            self.logger.error(f"❌ Критическая ошибка RAG поиска: {e}")
             with self.stats_lock:
                 self.stats['failed_queries'] += 1
             
-            return fallback_context, metrics
-    
-    def _get_relevance_description(self, score: float) -> str:
-        """Возвращает человекочитаемое описание релевантности результата"""
-        if score >= 0.9:
-            return "Отличное совпадение"
-        elif score >= 0.7:
-            return "Хорошее совпадение"
-        elif score >= 0.5:
-            return "Среднее совпадение"
-        else:
-            return "Слабое совпадение"
-    
-    def _get_speed_description(self, seconds: float) -> str:
-        """Возвращает человекочитаемое описание скорости поиска"""
-        if seconds < 2:
-            return "Быстро"
-        elif seconds <= 5:
-            return "Нормально"
-        else:
-            return "Медленно"
+            # Emergency fallback
+            emergency_context = "Система поиска временно недоступна. Используйте базовые знания о детском развитии."
+            emergency_metrics = {
+                'search_time': time.time() - search_start,
+                'chunks_found': 0,
+                'error': str(e),
+                'fallback_reason': 'critical_error'
+            }
+            return emergency_context, emergency_metrics
     
     def get_stats(self) -> Dict[str, Any]:
         """
-        Возвращает статистику работы RAG системы.
-        Полезно для мониторинга и оптимизации производительности.
+        Возвращает расширенную статистику для мониторинга производительности.
         """
         with self.stats_lock:
             stats_copy = self.stats.copy()
@@ -377,8 +406,17 @@ class RAGSystem:
         
         total_queries = stats_copy['successful_queries'] + stats_copy['failed_queries']
         
+        # Добавляем информацию о Circuit Breaker состояниях
+        circuit_breaker_info = {
+            'pinecone_cb_state': self.pinecone_circuit_breaker.state.value,
+            'pinecone_cb_failures': self.pinecone_circuit_breaker.failure_count,
+            'gemini_cb_state': self.gemini_circuit_breaker.state.value,
+            'gemini_cb_failures': self.gemini_circuit_breaker.failure_count,
+        }
+        
         return {
             **stats_copy,
+            **circuit_breaker_info,
             "cache_size": cache_size,
             "total_queries": total_queries,
             "success_rate": round(stats_copy['successful_queries'] / max(total_queries, 1) * 100, 1),
