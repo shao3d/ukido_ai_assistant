@@ -774,9 +774,15 @@ def generate_response(chat_id: str, user_message: str, is_test_mode: bool = Fals
             ai_response = ai_response.replace("[ACTION:SEND_LESSON_LINK]", lesson_url)
             logger.info("Обработан токен [ACTION:SEND_LESSON_LINK] - ссылка вставлена.")
 
-        if not is_test_mode and chat_id:
-            update_dialogue_state(chat_id, new_state)
-            update_conversation_history(chat_id, user_message, ai_response)
+        # ИСПРАВЛЕНО: Корректное обновление состояния и истории для всех режимов
+        if chat_id:
+            if is_test_mode:
+                # В тестовом режиме обновляем только тестовую память
+                update_test_conversation_history(chat_id, user_message, ai_response)
+            else:
+                # В реальном режиме обновляем и состояние, и историю
+                update_dialogue_state(chat_id, new_state)
+                update_conversation_history(chat_id, user_message, ai_response)
 
         total_time = time.time() - start_time
         success = True
@@ -1021,9 +1027,7 @@ def test_iron_fist_system():
             }
             latest_test_results["tests"].append(test_result)
 
-            # ВАЖНО: Обновляем тестовую память для СЛЕДУЮЩЕГО шага диалога
-            # Это ключевая логика для симуляции непрерывного разговора
-            update_test_conversation_history(test_chat_id, question, response)
+            # ВАЖНО: generate_response теперь сама обновляет тестовую память
             time.sleep(0.5)
 
         # Полная очистка после всех тестов
@@ -1076,7 +1080,6 @@ def show_iron_fist_results():
         
         redis_class = "good" if summary['redis_status'] == 'available' else 'error'
         pinecone_class = "good" if summary['pinecone_status'] == 'available' else 'error'
-        
         html = f"""
         <!DOCTYPE html>
         <html><head><title>Результаты тестирования Железного Кулака</title>
@@ -1098,7 +1101,7 @@ def show_iron_fist_results():
             <strong>Время тестирования:</strong> {summary['total_time']}с<br>
             <strong>Среднее время на вопрос:</strong> {summary['avg_time_per_question']}с<br>
             <strong>Вопросов протестировано:</strong> {summary['questions_tested']}<br>
-            <strong>Протестированные функции:</strong> {', '.join(summary['iron_fist_features_tested'])}<br>
+            <strong>Тип теста:</strong> {summary.get('test_type', 'Не определен')}<br>
             <strong>Redis:</strong> <span class="{redis_class}">{summary['redis_status']}</span><br>
             <strong>Pinecone:</strong> <span class="{pinecone_class}">{summary['pinecone_status']}</span><br>
             <strong>🚀 Общий успех запросов:</strong> {summary.get('performance_metrics', {}).get('successful_requests', 0)}<br>
