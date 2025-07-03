@@ -294,7 +294,7 @@ def get_dialogue_state(chat_id: str) -> str:
             if any(keyword in recent_messages for keyword in keywords):
                 return state
         
-        # Fallback по длине диалога
+        # Fallback - логика переходов по умолчанию
         if len(history) < 4:
             return 'greeting'
         elif len(history) < 8:
@@ -398,7 +398,7 @@ def rewrite_query_for_rag(history_list: list, user_message: str) -> str:
         return user_message
     
     # Если вопрос уже подробный, не переписываем
-    if len(user_message.split()) > 6:
+    if len(user_message.split()) > 3:
         return user_message
     
     # Кешируем результаты переписывания
@@ -472,7 +472,8 @@ def get_enhanced_base_prompt(current_state: str) -> str:
 ТЕКУЩАЯ ФАЗА: ГОТОВНОСТЬ К ЗАПИСИ
 - Родитель готов к следующему шагу
 - ОБЯЗАТЕЛЬНО предложи пробный урок
-- Используй токен [ACTION:SEND_LESSON_LINK] для ссылки
+- ВСЕГДА вставляй токен [ACTION:SEND_LESSON_LINK] в ответ
+- Пример: "Записывайтесь: [ACTION:SEND_LESSON_LINK]"
 - Будь уверенным, но не давящим"""
     }
 
@@ -482,8 +483,9 @@ def get_enhanced_base_prompt(current_state: str) -> str:
 
 ### ЖЕЛЕЗНЫЙ КУЛАК: ПРАВИЛА ПРЕДЛОЖЕНИЯ УРОКА
 - Предлагай урок ТОЛЬКО если текущее состояние = 'closing'
-- При предложении урока используй токен [ACTION:SEND_LESSON_LINK] вместо генерации ссылки
+- При предложении урока ВСЕГДА используй токен [ACTION:SEND_LESSON_LINK]
 - НЕ генерируй ссылки самостоятельно - только токен!
+- Пример: "Записывайтесь: [ACTION:SEND_LESSON_LINK]"
 
 ### ГЛАВНЫЕ ПРАВИЛА ПОВЕДЕНИЯ
 1.  **ПРАВИЛО ВЫСШЕГО ПРИОРИТЕТА: ДЕЛИКАТНЫЕ ТЕМЫ.** Если родитель говорит о проблемах ребенка (застенчивость, страхи, конфликты, неуверенность), **ПОЛНОСТЬЮ ОТКЛЮЧИ ИРОНИЮ И ШУТКИ**. Твой тон — максимально тактичный и поддерживающий.
