@@ -302,7 +302,7 @@ class ProductionAIService:
                 return fast_response
             
             # Получаем состояние пользователя
-            current_state = conversation_manager.get_user_state(chat_id)
+            current_state = conversation_manager.get_dialogue_state(chat_id)
             
             # Parallel processing для независимых операций
             def get_rag_context():
@@ -347,7 +347,7 @@ class ProductionAIService:
             
             # Обновляем историю
             conversation_manager.update_conversation_history(chat_id, user_message, final_response)
-            conversation_manager.update_user_state(chat_id, analysis_data.get('state', current_state))
+            conversation_manager.set_dialogue_state(chat_id, analysis_data.get('state', current_state))
             
             # Обновляем статистику
             total_time = time.time() - start_time
