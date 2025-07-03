@@ -774,15 +774,7 @@ def generate_response(chat_id: str, user_message: str, is_test_mode: bool = Fals
             ai_response = ai_response.replace("[ACTION:SEND_LESSON_LINK]", lesson_url)
             logger.info("Обработан токен [ACTION:SEND_LESSON_LINK] - ссылка вставлена.")
 
-        # ИСПРАВЛЕНО: Корректное обновление состояния и истории для всех режимов
-        if chat_id:
-            if is_test_mode:
-                # В тестовом режиме обновляем только тестовую память
-                update_test_conversation_history(chat_id, user_message, ai_response)
-            else:
-                # В реальном режиме обновляем и состояние, и историю
-                update_dialogue_state(chat_id, new_state)
-                update_conversation_history(chat_id, user_message, ai_response)
+
 
         total_time = time.time() - start_time
         success = True
@@ -979,12 +971,19 @@ def webhook():
         # Генерируем ответ и отправляем
         ai_response, metrics = generate_response(chat_id, received_text)
         success = send_telegram_message(chat_id, ai_response)
-        
+
+        # Обновляем состояние и историю ПОСЛЕ отправки ответа
+        if chat_id:
+            new_state = metrics.get('dialogue_state_transition', 'N/A').split(' → ')[-1]
+            if new_state in DIALOGUE_STATES:
+                update_dialogue_state(chat_id, new_state)
+            update_conversation_history(chat_id, received_text, ai_response)
+
         if success:
             transition = metrics.get('dialogue_state_transition', 'N/A')
             cache_status = "HIT" if metrics.get('cache_hit', False) else "MISS"
             logger.info(f"Обработан запрос от {chat_id}: {metrics.get('total_time', 'N/A')}с, переход: {transition}, кеш: {cache_status}")
-        
+
         return "OK", 200
         
     except Exception as e:
@@ -1027,7 +1026,9 @@ def test_iron_fist_system():
             }
             latest_test_results["tests"].append(test_result)
 
-            # ВАЖНО: generate_response теперь сама обновляет тестовую память
+            # ВЕРНУТЬ ЭТУ СТРОКУ:
+            update_test_conversation_history(test_chat_id, question, response)
+
             time.sleep(0.5)
 
         # Полная очистка после всех тестов
