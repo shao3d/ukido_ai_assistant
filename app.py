@@ -1,4 +1,5 @@
 
+
 import os
 import requests
 import google.generativeai as genai
@@ -13,6 +14,9 @@ import threading
 from datetime import datetime
 from functools import lru_cache, wraps
 from typing import Optional, Tuple, Dict, Any
+
+# Фиксируем время старта сервера в формате Unix timestamp
+SERVER_START_TIME = datetime.now().timestamp()
 
 # --- НАСТРОЙКИ И ЗАГРУЗКА КЛЮЧЕЙ! ---
 load_dotenv()
@@ -982,33 +986,42 @@ def get_metrics():
 
 
 # --- ИЗМЕНЕННЫЙ ГЛАВНЫЙ WEBHOOK ---
+
 @app.route('/', methods=['POST'])
 def webhook():
     """
-    ИЗМЕНЕНО: Главный webhook. Теперь он НЕ блокирующий.
-    Он только принимает запрос, запускает фоновую задачу и мгновенно отвечает Telegram.
+    ИЗМЕНЕНО: Добавлен фильтр для игнорирования старых сообщений.
     """
     try:
         update = request.get_json()
         if not update or "message" not in update:
             return "OK", 200
+
         message = update.get("message", {})
+        message_date = message.get("date")
+
+        # --- НОВЫЙ ФИЛЬТР ---
+        # Если у сообщения есть дата и она старше, чем время запуска сервера, игнорируем его.
+        if message_date and message_date < SERVER_START_TIME:
+            logger.info(f"Игнорируем старое сообщение (timestamp: {message_date})")
+            return "OK", 200
+        # --------------------
+
         if "text" not in message or "chat" not in message:
             return "OK", 200
+
         chat_id = message["chat"]["id"]
         received_text = message["text"]
-        # --- КЛЮЧЕВОЕ ИЗМЕНЕНИЕ ---
-        # Создаем новый поток, который будет выполнять нашу тяжелую функцию
+
         thread = threading.Thread(
-            target=process_message_in_background,
+            target=process_message_in_background, 
             args=(chat_id, received_text)
         )
-        # Запускаем поток (он начнет выполняться в фоне)
         thread.start()
-        # -------------------------
+
         logger.info(f"Запрос от {chat_id} принят. Запущена фоновая обработка.")
-        # Мгновенно возвращаем ответ Telegram, не дожидаясь завершения потока
         return "OK", 200
+
     except Exception as e:
         logger.error(f"Ошибка в webhook (до запуска потока): {e}")
         return "Error", 500
