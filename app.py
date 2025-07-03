@@ -389,6 +389,20 @@ def metrics():
     }
 
 
+@app.route('/clear-memory', methods=['POST'])
+def clear_memory():
+    """
+    Endpoint для ручной очистки памяти диалогов.
+    Полезно для тестирования.
+    """
+    try:
+        conversation_manager._clear_all_memory()
+        return {"success": True, "message": "Память диалогов очищена"}, 200
+    except Exception as e:
+        logging.getLogger(__name__).error(f"Ошибка очистки памяти: {e}")
+        return {"success": False, "error": str(e)}, 500
+
+
 # === ТОЧКА ВХОДА ===
 
 if __name__ == '__main__':

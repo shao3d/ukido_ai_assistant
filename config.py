@@ -41,6 +41,9 @@ class Config:
         self.PORT = int(os.environ.get('PORT', 5000))
         self.DEBUG_MODE = os.environ.get('DEBUG', 'false').lower() == 'true'
         
+        # === НАСТРОЙКА ОЧИСТКИ ПАМЯТИ ДЛЯ ТЕСТИРОВАНИЯ ===
+        self.CLEAR_MEMORY_ON_START = os.environ.get('CLEAR_MEMORY_ON_START', 'false').lower() == 'true'
+        
         # === НАСТРОЙКИ ПАМЯТИ И ПРОИЗВОДИТЕЛЬНОСТИ ===
         self.CONVERSATION_MEMORY_SIZE = 15  # Количество сообщений в истории
         self.CONVERSATION_EXPIRATION_SECONDS = 3600  # Время жизни диалога (1 час)
@@ -78,6 +81,7 @@ class Config:
         self.logger = logging.getLogger(__name__)
         self.logger.info("🔧 Конфигурация успешно загружена")
         self.logger.info(f"🚀 Режим отладки: {'включен' if self.DEBUG_MODE else 'отключен'}")
+        self.logger.info(f"🧹 Очистка памяти при старте: {'включена' if self.CLEAR_MEMORY_ON_START else 'отключена'}")
         self.logger.info(f"🌐 Base URL: {self.BASE_URL}")
     
     def validate_configuration(self) -> bool:

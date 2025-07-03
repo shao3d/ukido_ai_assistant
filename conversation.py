@@ -61,6 +61,11 @@ class ConversationManager:
         self.user_locks_lock = threading.Lock()
         
         self.logger.info("🧠 Менеджер диалогов инициализирован")
+        
+        # Очистка памяти при старте (для тестирования)
+        if config.CLEAR_MEMORY_ON_START:
+            self._clear_all_memory()
+            self.logger.info("🧹 Вся память диалогов очищена (режим тестирования)")
     
     def _init_redis(self):
         """
@@ -284,6 +289,37 @@ class ConversationManager:
             for key in old_keys:
                 del self.fallback_memory[key]
             self.logger.info(f"Очищена fallback память: удалено {len(old_keys)} старых записей")
+    
+    def _clear_all_memory(self):
+        """
+        Очищает всю память диалогов (Redis + fallback).
+        Используется для тестирования при CLEAR_MEMORY_ON_START=true.
+        """
+        cleared_redis = 0
+        cleared_fallback = 0
+        
+        # Очищаем Redis
+        if self.redis_available:
+            try:
+                # Находим все ключи связанные с диалогами
+                keys_to_delete = []
+                for pattern in ['history:*', 'state:*', 'metadata:*']:
+                    keys = self.redis_client.keys(pattern)
+                    keys_to_delete.extend(keys)
+                
+                if keys_to_delete:
+                    cleared_redis = self.redis_client.delete(*keys_to_delete)
+                    self.logger.info(f"Очищено {cleared_redis} ключей из Redis")
+            except Exception as e:
+                self.logger.warning(f"Ошибка очистки Redis: {e}")
+        
+        # Очищаем fallback память
+        with self.fallback_memory_lock:
+            cleared_fallback = len(self.fallback_memory)
+            self.fallback_memory.clear()
+        
+        if cleared_fallback > 0:
+            self.logger.info(f"Очищено {cleared_fallback} записей из fallback памяти")
     
     def analyze_message_for_state_transition(self, user_message: str, current_state: str) -> str:
         """
