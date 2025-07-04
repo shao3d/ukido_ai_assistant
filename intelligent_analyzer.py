@@ -386,6 +386,83 @@ class ProductionIntelligentAnalyzer:
             self._update_performance_stats(analysis_start, saved_llm_call=False)
             return current_state
     
+    def enrich_query_with_context(self, query: str, conversation_history: List[str] = None) -> str:
+        """
+        Production-ready обогащение RAG запроса контекстом диалога
+        """
+        analysis_start = time.time()
+        # Fast path: если query уже содержит контекст - пропускаем AI
+        context_indicators = ['школа', 'ukido', 'преподаватель', 'курс', 'урок', 'обучение']
+        if any(word in query.lower() for word in context_indicators):
+            self.logger.info(f"⚡ Query уже содержит контекст, пропускаем обогащение: {query}")
+            return query
+        # Проверяем наличие истории диалога
+        if not conversation_history or len(conversation_history) < 2:
+            self.logger.info("📝 Недостаточно истории для обогащения")
+            return query
+        # Генерируем ключ кеша
+        recent_history = conversation_history[-3:] if len(conversation_history) >= 3 else conversation_history
+        history_text = ' '.join(recent_history)
+        cache_key = self._generate_fast_cache_key(f"{query}|{history_text}", "enrich")
+        # Проверяем кеш
+        cached_result = self.cache.get(cache_key, query)
+        if cached_result != query:  # Если нашли обогащенную версию в кеше
+            with self.performance_lock:
+                self.performance_stats['cache_hits'] += 1
+            self._update_performance_stats(analysis_start, saved_llm_call=True)
+            self.logger.info(f"💾 Обогащенный запрос из кеша: {cached_result}")
+            return cached_result
+        # Быстрая проверка: короткий ли запрос (требует обогащения)
+        query_words = query.split()
+        if len(query_words) >= 4:  # Длинные запросы обычно уже содержат контекст
+            self.logger.info(f"🔍 Запрос достаточно длинный, обогащение не требуется: {query}")
+            return query
+        # Micro-prompt для универсального обогащения
+        with self.performance_lock:
+            self.performance_stats['llm_calls_made'] += 1
+        # Оптимизированный micro-prompt (сокращен в 3 раза для скорости)
+        micro_prompt = f"""Диалог: {' | '.join(recent_history[-2:])}
+Вопрос: \"{query}\"
+Сделай вопрос полным для поиска в базе школы Ukido.
+Примеры: \"Цена?\" → \"Цена курса Юный Оратор\", \"Кто ведет?\" → \"Преподаватели Ukido\"
+Полный вопрос:
+        """
+        try:
+            enriched_query = self._safe_llm_call_for_enrichment(micro_prompt).strip()
+            # Валидация результата
+            if not enriched_query or len(enriched_query) > 200 or enriched_query == query:
+                # Fallback к оригинальному запросу
+                enriched_query = query
+                self.logger.info(f"🔄 Fallback к оригинальному запросу: {query}")
+            else:
+                self.logger.info(f"✨ Запрос обогащен: '{query}' → '{enriched_query}'")
+            # Кешируем результат
+            self.cache.set(cache_key, enriched_query, 'factual')
+            self._update_performance_stats(analysis_start, saved_llm_call=False)
+            return enriched_query
+        except Exception as e:
+            self.logger.error(f"Ошибка обогащения запроса: {e}")
+            # Graceful degradation - возвращаем оригинальный запрос
+            self._update_performance_stats(analysis_start, saved_llm_call=False)
+            return query
+
+    def _safe_llm_call_for_enrichment(self, prompt: str) -> str:
+        """
+        КРИТИЧНО: Реальный AI вызов для обогащения запросов (не mock!)
+        """
+        try:
+            import google.generativeai as genai
+            # Используем уже настроенный API ключ из config
+            genai.configure(api_key=config.GEMINI_API_KEY)
+            model = genai.GenerativeModel('gemini-1.5-flash')
+            response = model.generate_content(prompt)
+            if response.text:
+                return response.text.strip()
+            else:
+                return "fallback"
+        except Exception as e:
+            self.logger.error(f"Gemini API error in enrichment: {e}")
+            return "fallback"
     def _normalize_text_fast(self, text: str) -> str:
         """Быстрая нормализация текста для кеширования"""
         return re.sub(r'\s+', ' ', text.lower().strip())
@@ -507,3 +584,7 @@ def should_use_philosophical_deep_dive(conversation_history: List[str]) -> Tuple
 def should_use_humor_taboo(user_message: str) -> bool:
     """Backward compatibility wrapper"""
     return intelligent_analyzer.should_use_humor_taboo_fast(user_message)
+
+def enrich_query_with_context(query: str, conversation_history: List[str] = None) -> str:
+    """Backward compatibility wrapper"""
+    return intelligent_analyzer.enrich_query_with_context(query, conversation_history)

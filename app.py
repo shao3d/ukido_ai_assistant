@@ -443,21 +443,24 @@ class ProductionAIService:
             current_state = conversation_manager.get_dialogue_state(chat_id)
             
             # Parallel processing для независимых операций
-            def get_rag_context():
-                context, metrics = rag_system.search_knowledge_base(user_message)
-                return context
-            
             def get_conversation_history():
                 return conversation_manager.get_conversation_history(chat_id)
-            
+
+            def get_rag_context():
+                # Получаем историю для обогащения запроса
+                history = conversation_manager.get_conversation_history(chat_id)
+                # Обогащаем запрос контекстом диалога
+                enriched_query = intelligent_analyzer.enrich_query_with_context(user_message, history)
+                context, metrics = rag_system.search_knowledge_base(enriched_query)
+                return context
+
             # Запускаем параллельно
             try:
-                rag_future = self.executor.submit(get_rag_context)
                 history_future = self.executor.submit(get_conversation_history)
-                
-                # Собираем результаты
-                facts_context = rag_future.result(timeout=5)
                 conversation_history = history_future.result(timeout=3)
+                # RAG с обогащением (последовательно, так как зависит от истории)
+                rag_future = self.executor.submit(get_rag_context)
+                facts_context = rag_future.result(timeout=5)
             except Exception as e:
                 # Fallback при проблемах с параллельной обработкой
                 self.logger.error(f"Parallel processing error: {e}")
