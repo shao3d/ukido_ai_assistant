@@ -68,6 +68,10 @@ class ProductionFastResponseCache:
         # ИСПРАВЛЕНО: Убрана захардкоженная ссылка для 'пробный'
         self.fast_responses = {
             'цена': "Стоимость курсов от 6000 до 8000 грн в месяц в зависимости от возраста. Первый урок бесплатный!",
+            'стоимость': "Стоимость курсов от 6000 до 8000 грн в месяц в зависимости от возраста. Первый урок бесплатный!",  # ДОБАВЛЕНО
+            'сколько стоит': "Стоимость курсов от 6000 до 8000 грн в месяц в зависимости от возраста. Первый урок бесплатный!",  # ДОБАВЛЕНО
+            'сколько стоят': "Стоимость курсов от 6000 до 8000 грн в месяц в зависимости от возраста. Первый урок бесплатный!",  # ДОБАВЛЕНО
+            'дорого': "Стоимость курсов от 6000 до 8000 грн в месяц в зависимости от возраста. Первый урок бесплатный! Это инвестиция в будущее вашего ребенка.",  # ДОБАВЛЕНО
             'возраст': "У нас курсы для разных возрастов: 7-10 лет (Юный оратор), 9-12 лет (Эмоциональный компас), 11-14 лет (Капитан проектов).",
             'онлайн': "Да, все занятия проходят онлайн в удобном формате с живым общением.",
             'расписание': "Занятия 2 раза в неделю по 90 минут. Расписание подбираем индивидуально под вас.",
@@ -500,7 +504,6 @@ class ProductionAIService:
         try:
             with self.stats_lock:
                 self.performance_stats['total_requests'] += 1
-            
             # ИСПРАВЛЕНО: Проверяем fast response с передачей chat_id
             fast_response = self.fast_response_cache.get_fast_response(user_message, chat_id)
             if fast_response:
@@ -508,33 +511,30 @@ class ProductionAIService:
                     self.performance_stats['fast_responses'] += 1
                 self.logger.info(f"⚡ Fast response для {chat_id}")
                 return fast_response
-            
             # Получаем состояние пользователя
             current_state = conversation_manager.get_dialogue_state(chat_id)
-            
             # Parallel processing для независимых операций
             def get_conversation_history():
                 return conversation_manager.get_conversation_history(chat_id)
-
             def get_rag_context():
                 # Получаем историю для обогащения запроса
                 history = conversation_manager.get_conversation_history(chat_id)
                 # Обогащаем запрос контекстом диалога
                 enriched_query = intelligent_analyzer.enrich_query_with_context(user_message, history)
                 context, metrics = rag_system.search_knowledge_base(enriched_query)
-                return context
-
+                return context, metrics
             # Запускаем параллельно
             try:
                 history_future = self.executor.submit(get_conversation_history)
                 conversation_history = history_future.result(timeout=3)
                 # RAG с обогащением (последовательно, так как зависит от истории)
                 rag_future = self.executor.submit(get_rag_context)
-                facts_context = rag_future.result(timeout=5)
+                facts_context, rag_metrics = rag_future.result(timeout=5)
             except Exception as e:
                 # Fallback при проблемах с параллельной обработкой
                 self.logger.error(f"Parallel processing error: {e}")
                 facts_context = "Информация временно недоступна."
+                rag_metrics = {'best_score': 0.0, 'chunks_found': 0, 'fallback_reason': 'parallel_error'}
                 conversation_history = []
             
             parallel_time = time.time() - start_time
@@ -544,7 +544,6 @@ class ProductionAIService:
 
             # Определяем категорию и извлекаем RAG score
             question_category = intelligent_analyzer.analyze_question_category_optimized(user_message)
-            rag_metrics = locals().get('rag_metrics', {})
             rag_score = rag_metrics.get('best_score', 0.0) if 'rag_metrics' in locals() else 0.0
 
             # Single LLM call с умными стратегиями
