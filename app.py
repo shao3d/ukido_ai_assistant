@@ -1,10 +1,11 @@
 # app.py (CRITICAL FIXES - Production Ready)
 """
 🚨 КРИТИЧЕСКИЕ ИСПРАВЛЕНИЯ:
-1. Правильная генерация ссылок с user_id
-2. Убраны стилистические проблемы
-3. Исправлена логика fast response
-4. Улучшено форматирование ответов
+1. УБРАНО дублирование классов ZhvanetskyHumorLevelSystem и ProductionFastResponseCache
+2. Правильная генерация ссылок с user_id
+3. Убраны стилистические проблемы
+4. Исправлена логика fast response
+5. Улучшено форматирование ответов
 """
 
 import logging
@@ -18,7 +19,6 @@ import requests
 import weakref
 
 # Импортируем наши модули
-
 from config import config
 from telegram_bot import telegram_bot
 from conversation import conversation_manager
@@ -64,323 +64,6 @@ class ProductionFastResponseCache:
     """
     🚨 ИСПРАВЛЕНО: Fast response cache с правильной обработкой пробных уроков
     """
-    def __init__(self):
-        # ИСПРАВЛЕНО: Убрана захардкоженная ссылка для 'пробный'
-        self.fast_responses = {
-            'цена': "Стоимость курсов от 6000 до 8000 грн в месяц в зависимости от возраста. Первый урок бесплатный!",
-            'возраст': "У нас курсы для разных возрастов: 7-10 лет (Юный оратор), 9-12 лет (Эмоциональный компас), 11-14 лет (Капитан проектов).",
-            'онлайн': "Да, все занятия проходят онлайн в удобном формате с живым общением.",
-            'расписание': "Занятия 2 раза в неделю по 90 минут. Расписание подбираем индивидуально под вас.",
-            # УДАЛЕНО: 'пробный' - будет обрабатываться через AI для правильной генерации ссылки
-        }
-        # ДОБАВЛЕНО: Паттерны которые ДОЛЖНЫ обрабатываться через AI
-        self.ai_required_patterns = [
-            'пробн', 'записа', 'урок', 'бесплатн', 'попробова', 'тест'
-        ]
-        # Отслеживание использованных метафор для предотвращения повторений
-        self.used_metaphors = {}
-        self.usage_stats = {}
-        self.stats_lock = threading.Lock()
-        self.max_stats_entries = 1000
-        for key in self.fast_responses:
-            self.usage_stats[key] = 0
-        self.logger = logging.getLogger(f"{__name__}.FastCache")
-    def get_fast_response(self, user_message: str, chat_id: str = None) -> Optional[str]:
-        """
-        🚨 ИСПРАВЛЕНО: Пропускает запросы на пробный урок к AI для правильной генерации ссылки
-        """
-        message_lower = user_message.lower()
-        # КРИТИЧНО: Проверяем, требует ли сообщение обработки AI
-        for ai_pattern in self.ai_required_patterns:
-            if ai_pattern in message_lower:
-                self.logger.info(f"🎯 Сообщение требует AI обработки для ссылки с user_id: {ai_pattern}")
-                return None  # Пропускаем к AI
-        # Обычная логика fast response для остальных случаев
-        for keyword, response in self.fast_responses.items():
-            if keyword in message_lower and len(user_message.split()) <= 3:
-                with self.stats_lock:
-                    self.usage_stats[keyword] += 1
-                    self._cleanup_stats_if_needed()
-                return response
-        return None
-    def track_metaphor_usage(self, chat_id: str, response: str):
-        """ДОБАВЛЕНО: Отслеживание использованных метафор"""
-        if chat_id not in self.used_metaphors:
-            self.used_metaphors[chat_id] = set()
-        metaphor_patterns = [
-            'ресторан', 'меню', 'швейцарский нож', 'горячие пирожки',
-            'шведский стол', 'кулинарн', 'повар', 'блюдо'
-        ]
-        response_lower = response.lower()
-        for pattern in metaphor_patterns:
-            if pattern in response_lower:
-                self.used_metaphors[chat_id].add(pattern)
-    def get_metaphor_restriction(self, chat_id: str) -> str:
-        """Возвращает ограничения для промпта"""
-        used = self.used_metaphors.get(chat_id, set())
-        if used:
-            return f"\n❌ НЕ ИСПОЛЬЗУЙ уже использованные метафоры: {', '.join(used)}"
-        return ""
-    def _cleanup_stats_if_needed(self):
-        """Периодическая очистка статистики"""
-        if len(self.usage_stats) > self.max_stats_entries:
-            old_stats = {}
-            for key in self.fast_responses.keys():
-                old_stats[key] = self.usage_stats.get(key, 0)
-            self.usage_stats = old_stats
-            self.logger.info("🧹 Stats cleanup выполнен")
-
-class ZhvanetskyHumorLevelSystem:
-    """
-    🎭 СИСТЕМА ГРАДУСОВ ЮМОРА ЖВАНЕЦКОГО
-    
-    Определяет подходящий уровень юмора на основе типа вопроса и контекста.
-    """
-    def __init__(self):
-        self.logger = logging.getLogger(__name__)
-        # 🎯 СИСТЕМА УРОВНЕЙ ЮМОРА
-        self.humor_levels = {
-            'family_safe': {
-                'intensity': 'мягкий, семейный',
-                'style': 'добродушный, располагающий',
-                'examples': ['как в хорошем кафе', 'проще простого', 'удобно как дома']
-            },
-            'moderate': {
-                'intensity': 'умеренный, классический',  
-                'style': 'наблюдательный Жванецкий',
-                'examples': ['как швейцарский нож', 'жизнь как театр', 'все как у людей']
-            },
-            'sophisticated': {
-                'intensity': 'глубокий, философский',
-                'style': 'мудрые размышления',
-                'examples': ['воспитание как садоводство', 'дети как зеркало души']
-            },
-            'no_humor': {
-                'intensity': 'серьезный тон',
-                'style': 'эмпатичный, поддерживающий',
-                'examples': ['понимаю ваше беспокойство', 'это действительно важно']
-            }
-        }
-        # 🎯 МАППИНГ: базовая категория + детали → уровень юмора
-        self.humor_mapping_rules = {
-            # Простые фактические вопросы → семейный юмор
-            ('factual', 'basic'): 'family_safe',
-            ('factual', 'price'): 'family_safe', 
-            ('factual', 'schedule'): 'family_safe',
-            ('factual', 'age'): 'family_safe',
-            # Подробные вопросы → классический Жванецкий
-            ('factual', 'detailed'): 'moderate',
-            ('factual', 'comparison'): 'moderate',
-            # Философские темы → глубокий юмор
-            ('philosophical', 'any'): 'sophisticated',
-            ('problem_solving', 'parenting'): 'sophisticated',
-            # Деликатные темы → без юмора
-            ('sensitive', 'any'): 'no_humor',
-            ('problem_solving', 'crisis'): 'no_humor'
-        }
-        self.logger.info("🎭 Система градусов юмора Жванецкого инициализирована")
-    def analyze_question_details(self, user_message: str, basic_category: str) -> str:
-        """Детальный анализ вопроса внутри базовой категории"""
-        message_lower = user_message.lower()
-        if basic_category == 'factual':
-            # Простые фактические вопросы
-            if any(word in message_lower for word in ['цена', 'сколько', 'стоимость']):
-                return 'price'
-            elif any(word in message_lower for word in ['время', 'когда', 'расписание']):
-                return 'schedule'  
-            elif any(word in message_lower for word in ['возраст', 'лет', 'детей']):
-                return 'age'
-            elif any(word in message_lower for word in ['подробнее', 'детально', 'расскажи про']):
-                return 'detailed'
-            elif any(word in message_lower for word in ['лучше', 'выбрать', 'разница']):
-                return 'comparison'
-            else:
-                return 'basic'
-        elif basic_category == 'problem_solving':
-            # Проблемы воспитания vs кризисные ситуации
-            if any(word in message_lower for word in ['воспитание', 'развитие', 'обучение']):
-                return 'parenting'
-            elif any(word in message_lower for word in ['кризис', 'тяжело', 'депрессия']):
-                return 'crisis'
-            else:
-                return 'parenting'
-        else:
-            return 'any'
-    def get_humor_level(self, user_message: str, basic_category: str) -> str:
-        """Определяет подходящий уровень юмора"""
-        question_detail = self.analyze_question_details(user_message, basic_category)
-        humor_level = self.humor_mapping_rules.get((basic_category, question_detail), 'moderate')
-        self.logger.info(f"🎭 Юмор: {basic_category}.{question_detail} → {humor_level}")
-        return humor_level
-    def build_humor_instructions(self, humor_level: str, metaphor_restrictions: str = "") -> str:
-        """Создает инструкции по стилю для промпта"""
-        level_info = self.humor_levels[humor_level]
-        if humor_level == 'family_safe':
-            return f"""
-🎭 СТИЛЬ: Мягкий семейный Жванецкий
-• {level_info['intensity']} - {level_info['style']}
-• Простые, понятные метафоры из повседневной жизни
-• БЕЗ сарказма, иронии или сложных подтекстов
-• Теплый, располагающий тон
-• Примеры: {', '.join(level_info['examples'])}
-{metaphor_restrictions}
-"""
-        elif humor_level == 'moderate':
-            return f"""
-🎭 СТИЛЬ: Классический наблюдательный Жванецкий  
-• {level_info['intensity']} - {level_info['style']}
-• Житейские метафоры с легкой иронией
-• Подмечает забавные стороны обычных ситуаций
-• Мудрые наблюдения без язвительности
-• Примеры: {', '.join(level_info['examples'])}
-{metaphor_restrictions}
-"""
-        elif humor_level == 'sophisticated':
-            return f"""
-🎭 СТИЛЬ: Философский глубокий Жванецкий
-• {level_info['intensity']} - {level_info['style']}
-• Метафоры с глубоким смыслом о человеческой природе
-• Тонкие наблюдения о воспитании и жизни
-• Помогает увидеть суть через призму юмора
-• Примеры: {', '.join(level_info['examples'])}
-{metaphor_restrictions}
-"""
-        else:  # no_humor
-            return f"""
-🎭 СТИЛЬ: Серьезный, эмпатичный тон
-• {level_info['intensity']} - {level_info['style']}
-• БЕЗ юмора, метафор и шуток
-• Прямые, четкие, поддерживающие ответы
-• Понимание и профессиональная помощь
-• Примеры: {', '.join(level_info['examples'])}
-"""
-    """
-    🎭 СИСТЕМА ГРАДУСОВ ЮМОРА ЖВАНЕЦКОГО
-    
-    Определяет подходящий уровень юмора на основе типа вопроса и контекста.
-    """
-    def __init__(self):
-        self.logger = logging.getLogger(__name__)
-        # 🎯 СИСТЕМА УРОВНЕЙ ЮМОРА
-        self.humor_levels = {
-            'family_safe': {
-                'intensity': 'мягкий, семейный',
-                'style': 'добродушный, располагающий',
-                'examples': ['как в хорошем кафе', 'проще простого', 'удобно как дома']
-            },
-            'moderate': {
-                'intensity': 'умеренный, классический',  
-                'style': 'наблюдательный Жванецкий',
-                'examples': ['как швейцарский нож', 'жизнь как театр', 'все как у людей']
-            },
-            'sophisticated': {
-                'intensity': 'глубокий, философский',
-                'style': 'мудрые размышления',
-                'examples': ['воспитание как садоводство', 'дети как зеркало души']
-            },
-            'no_humor': {
-                'intensity': 'серьезный тон',
-                'style': 'эмпатичный, поддерживающий',
-                'examples': ['понимаю ваше беспокойство', 'это действительно важно']
-            }
-        }
-        # 🎯 МАППИНГ: базовая категория + детали → уровень юмора
-        self.humor_mapping_rules = {
-            # Простые фактические вопросы → семейный юмор
-            ('factual', 'basic'): 'family_safe',
-            ('factual', 'price'): 'family_safe', 
-            ('factual', 'schedule'): 'family_safe',
-            ('factual', 'age'): 'family_safe',
-            # Подробные вопросы → классический Жванецкий
-            ('factual', 'detailed'): 'moderate',
-            ('factual', 'comparison'): 'moderate',
-            # Философские темы → глубокий юмор
-            ('philosophical', 'any'): 'sophisticated',
-            ('problem_solving', 'parenting'): 'sophisticated',
-            # Деликатные темы → без юмора
-            ('sensitive', 'any'): 'no_humor',
-            ('problem_solving', 'crisis'): 'no_humor'
-        }
-        self.logger.info("🎭 Система градусов юмора Жванецкого инициализирована")
-    def analyze_question_details(self, user_message: str, basic_category: str) -> str:
-        """Детальный анализ вопроса внутри базовой категории"""
-        message_lower = user_message.lower()
-        if basic_category == 'factual':
-            # Простые фактические вопросы
-            if any(word in message_lower for word in ['цена', 'сколько', 'стоимость']):
-                return 'price'
-            elif any(word in message_lower for word in ['время', 'когда', 'расписание']):
-                return 'schedule'  
-            elif any(word in message_lower for word in ['возраст', 'лет', 'детей']):
-                return 'age'
-            elif any(word in message_lower for word in ['подробнее', 'детально', 'расскажи про']):
-                return 'detailed'
-            elif any(word in message_lower for word in ['лучше', 'выбрать', 'разница']):
-                return 'comparison'
-            else:
-                return 'basic'
-        elif basic_category == 'problem_solving':
-            # Проблемы воспитания vs кризисные ситуации
-            if any(word in message_lower for word in ['воспитание', 'развитие', 'обучение']):
-                return 'parenting'
-            elif any(word in message_lower for word in ['кризис', 'тяжело', 'депрессия']):
-                return 'crisis'
-            else:
-                return 'parenting'
-        else:
-            return 'any'
-    def get_humor_level(self, user_message: str, basic_category: str) -> str:
-        """Определяет подходящий уровень юмора"""
-        question_detail = self.analyze_question_details(user_message, basic_category)
-        humor_level = self.humor_mapping_rules.get((basic_category, question_detail), 'moderate')
-        self.logger.info(f"🎭 Юмор: {basic_category}.{question_detail} → {humor_level}")
-        return humor_level
-    def build_humor_instructions(self, humor_level: str, metaphor_restrictions: str = "") -> str:
-        """Создает инструкции по стилю для промпта"""
-        level_info = self.humor_levels[humor_level]
-        if humor_level == 'family_safe':
-            return f"""
-🎭 СТИЛЬ: Мягкий семейный Жванецкий
-• {level_info['intensity']} - {level_info['style']}
-• Простые, понятные метафоры из повседневной жизни
-• БЕЗ сарказма, иронии или сложных подтекстов
-• Теплый, располагающий тон
-• Примеры: {', '.join(level_info['examples'])}
-{metaphor_restrictions}
-"""
-        elif humor_level == 'moderate':
-            return f"""
-🎭 СТИЛЬ: Классический наблюдательный Жванецкий  
-• {level_info['intensity']} - {level_info['style']}
-• Житейские метафоры с легкой иронией
-• Подмечает забавные стороны обычных ситуаций
-• Мудрые наблюдения без язвительности
-• Примеры: {', '.join(level_info['examples'])}
-{metaphor_restrictions}
-"""
-        elif humor_level == 'sophisticated':
-            return f"""
-🎭 СТИЛЬ: Философский глубокий Жванецкий
-• {level_info['intensity']} - {level_info['style']}
-• Метафоры с глубоким смыслом о человеческой природе
-• Тонкие наблюдения о воспитании и жизни
-• Помогает увидеть суть через призму юмора
-• Примеры: {', '.join(level_info['examples'])}
-{metaphor_restrictions}
-"""
-        else:  # no_humor
-            return f"""
-🎭 СТИЛЬ: Серьезный, эмпатичный тон
-• {level_info['intensity']} - {level_info['style']}
-• БЕЗ юмора, метафор и шуток
-• Прямые, четкие, поддерживающие ответы
-• Понимание и профессиональная помощь
-• Примеры: {', '.join(level_info['examples'])}
-"""
-    """
-    🚨 ИСПРАВЛЕНО: Fast response cache с правильной обработкой пробных уроков
-    """
-    
     def __init__(self):
         # ИСПРАВЛЕНО: Убрана захардкоженная ссылка для 'пробный'
         self.fast_responses = {
@@ -462,6 +145,138 @@ class ZhvanetskyHumorLevelSystem:
             self.logger.info("🧹 Stats cleanup выполнен")
 
 
+class ZhvanetskyHumorLevelSystem:
+    """
+    🎭 СИСТЕМА ГРАДУСОВ ЮМОРА ЖВАНЕЦКОГО
+    
+    Определяет подходящий уровень юмора на основе типа вопроса и контекста.
+    """
+    def __init__(self):
+        self.logger = logging.getLogger(__name__)
+        # 🎯 СИСТЕМА УРОВНЕЙ ЮМОРА
+        self.humor_levels = {
+            'family_safe': {
+                'intensity': 'мягкий, семейный',
+                'style': 'добродушный, располагающий',
+                'examples': ['как в хорошем кафе', 'проще простого', 'удобно как дома']
+            },
+            'moderate': {
+                'intensity': 'умеренный, классический',  
+                'style': 'наблюдательный Жванецкий',
+                'examples': ['как швейцарский нож', 'жизнь как театр', 'все как у людей']
+            },
+            'sophisticated': {
+                'intensity': 'глубокий, философский',
+                'style': 'мудрые размышления',
+                'examples': ['воспитание как садоводство', 'дети как зеркало души']
+            },
+            'no_humor': {
+                'intensity': 'серьезный тон',
+                'style': 'эмпатичный, поддерживающий',
+                'examples': ['понимаю ваше беспокойство', 'это действительно важно']
+            }
+        }
+        
+        # 🎯 МАППИНГ: базовая категория + детали → уровень юмора
+        self.humor_mapping_rules = {
+            # Простые фактические вопросы → семейный юмор
+            ('factual', 'basic'): 'family_safe',
+            ('factual', 'price'): 'family_safe', 
+            ('factual', 'schedule'): 'family_safe',
+            ('factual', 'age'): 'family_safe',
+            # Подробные вопросы → классический Жванецкий
+            ('factual', 'detailed'): 'moderate',
+            ('factual', 'comparison'): 'moderate',
+            # Философские темы → глубокий юмор
+            ('philosophical', 'any'): 'sophisticated',
+            ('problem_solving', 'parenting'): 'sophisticated',
+            # Деликатные темы → без юмора
+            ('sensitive', 'any'): 'no_humor',
+            ('problem_solving', 'crisis'): 'no_humor'
+        }
+        self.logger.info("🎭 Система градусов юмора Жванецкого инициализирована")
+    
+    def analyze_question_details(self, user_message: str, basic_category: str) -> str:
+        """Детальный анализ вопроса внутри базовой категории"""
+        message_lower = user_message.lower()
+        
+        if basic_category == 'factual':
+            # Простые фактические вопросы
+            if any(word in message_lower for word in ['цена', 'сколько', 'стоимость']):
+                return 'price'
+            elif any(word in message_lower for word in ['время', 'когда', 'расписание']):
+                return 'schedule'  
+            elif any(word in message_lower for word in ['возраст', 'лет', 'детей']):
+                return 'age'
+            elif any(word in message_lower for word in ['подробнее', 'детально', 'расскажи про']):
+                return 'detailed'
+            elif any(word in message_lower for word in ['лучше', 'выбрать', 'разница']):
+                return 'comparison'
+            else:
+                return 'basic'
+        elif basic_category == 'problem_solving':
+            # Проблемы воспитания vs кризисные ситуации
+            if any(word in message_lower for word in ['воспитание', 'развитие', 'обучение']):
+                return 'parenting'
+            elif any(word in message_lower for word in ['кризис', 'тяжело', 'депрессия']):
+                return 'crisis'
+            else:
+                return 'parenting'
+        else:
+            return 'any'
+    
+    def get_humor_level(self, user_message: str, basic_category: str) -> str:
+        """Определяет подходящий уровень юмора"""
+        question_detail = self.analyze_question_details(user_message, basic_category)
+        humor_level = self.humor_mapping_rules.get((basic_category, question_detail), 'moderate')
+        self.logger.info(f"🎭 Юмор: {basic_category}.{question_detail} → {humor_level}")
+        return humor_level
+    
+    def build_humor_instructions(self, humor_level: str, metaphor_restrictions: str = "") -> str:
+        """Создает инструкции по стилю для промпта"""
+        level_info = self.humor_levels[humor_level]
+        
+        if humor_level == 'family_safe':
+            return f"""
+🎭 СТИЛЬ: Мягкий семейный Жванецкий
+• {level_info['intensity']} - {level_info['style']}
+• Простые, понятные метафоры из повседневной жизни
+• БЕЗ сарказма, иронии или сложных подтекстов
+• Теплый, располагающий тон
+• Примеры: {', '.join(level_info['examples'])}
+{metaphor_restrictions}
+"""
+        elif humor_level == 'moderate':
+            return f"""
+🎭 СТИЛЬ: Классический наблюдательный Жванецкий  
+• {level_info['intensity']} - {level_info['style']}
+• Житейские метафоры с легкой иронией
+• Подмечает забавные стороны обычных ситуаций
+• Мудрые наблюдения без язвительности
+• Примеры: {', '.join(level_info['examples'])}
+{metaphor_restrictions}
+"""
+        elif humor_level == 'sophisticated':
+            return f"""
+🎭 СТИЛЬ: Философский глубокий Жванецкий
+• {level_info['intensity']} - {level_info['style']}
+• Метафоры с глубоким смыслом о человеческой природе
+• Тонкие наблюдения о воспитании и жизни
+• Помогает увидеть суть через призму юмора
+• Примеры: {', '.join(level_info['examples'])}
+{metaphor_restrictions}
+"""
+        else:  # no_humor
+            return f"""
+🎭 СТИЛЬ: Серьезный, эмпатичный тон
+• {level_info['intensity']} - {level_info['style']}
+• БЕЗ юмора, метафор и шуток
+• Прямые, четкие, поддерживающие ответы
+• Понимание и профессиональная помощь
+• Примеры: {', '.join(level_info['examples'])}
+"""
+
+
 class OptimizedPromptBuilder:
     """
     🚨 ИСПРАВЛЕНО: Промпты без "Ответ:", "ну", с правильным форматированием
@@ -477,22 +292,28 @@ class OptimizedPromptBuilder:
         """
         # Инициализируем систему юмора
         humor_system = ZhvanetskyHumorLevelSystem()
+        
         # Получаем базовую категорию от существующей системы (используем intelligent_analyzer)
         try:
             basic_category = intelligent_analyzer.analyze_question_category_optimized(user_message)
         except:
             basic_category = 'factual'  # fallback
+        
         # Определяем уровень юмора на основе детального анализа
         humor_level = humor_system.get_humor_level(user_message, basic_category)
+        
         # Создаем инструкции по стилю
         humor_instructions = humor_system.build_humor_instructions(humor_level, metaphor_restrictions)
+        
         short_history = '\n'.join(conversation_history[-4:]) if conversation_history else "Начало диалога"
         short_facts = facts_context[:800] + "..." if len(facts_context) > 800 else facts_context
+        
         # Определяем тип ответа (сохраняем существующую логику)
         message_lower = user_message.lower()
         detailed_keywords = ['расскажи про', 'подробнее', 'детально', 'все курсы', 'что у вас есть']
         lesson_request_keywords = ['записаться', 'пробный', 'попробовать', 'хочу урок', 'тестово']
         simple_keywords = ['цена', 'сколько', 'когда', 'где', 'возраст', 'время']
+        
         if any(keyword in message_lower for keyword in detailed_keywords):
             response_type = "подробный"
         elif any(keyword in message_lower for keyword in lesson_request_keywords):
@@ -501,12 +322,13 @@ class OptimizedPromptBuilder:
             response_type = "краткий"
         else:
             response_type = "средний"
+        
         # Создаем итоговый промпт
         return f"""Ты AI-ассистент онлайн-школы Ukido для развития soft-skills у детей.
 
 {humor_instructions}
 
-� ОПРЕДЕЛЕНО СИСТЕМОЙ:
+💡 ОПРЕДЕЛЕНО СИСТЕМОЙ:
 • Базовая категория: {basic_category}
 • Уровень юмора: {humor_level}  
 • Тип ответа: {response_type}
@@ -897,6 +719,8 @@ if __name__ == '__main__':
     
     logger.info("=" * 60)
     logger.info("🚨 PRODUCTION-READY UKIDO AI ASSISTANT - CRITICAL FIXES APPLIED")
+    logger.info("✅ УБРАНО дублирование классов ZhvanetskyHumorLevelSystem")
+    logger.info("✅ УБРАНО дублирование класса ProductionFastResponseCache")
     logger.info("✅ Правильные ссылки с user_id для HubSpot интеграции")
     logger.info("✅ Убраны стилистические проблемы (ну, ответ)")
     logger.info("✅ Улучшено форматирование и структура ответов")
