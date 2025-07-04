@@ -792,6 +792,62 @@ def clear_memory():
         return {"success": False, "error": str(e)}, 500
 
 
+# === ТЕСТОВЫЙ ENDPOINT (легко отключить закомментированием) ===
+
+@app.route('/test-message', methods=['POST'])
+def test_message_endpoint():
+    """
+    🧪 ТЕСТОВЫЙ ENDPOINT для локального тестирования ответов бота
+    
+    Использует тот же AI сервис что и основной webhook.
+    НЕ отправляет сообщения в Telegram - только возвращает ответ.
+    
+    Для отключения - просто закомментируйте весь этот блок.
+    """
+    try:
+        # Валидация входных данных
+        data = request.get_json()
+        if not data or 'message' not in data:
+            return {"error": "Требуется поле 'message'"}, 400
+        
+        message_text = data['message']
+        test_user_id = data.get('user_id', f'test_user_{int(time.time())%10000}')
+        
+        # Безопасная проверка: только для непродакшн использования
+        if len(message_text) > 1000:
+            return {"error": "Сообщение слишком длинное (макс. 1000 символов)"}, 400
+        
+        # Логируем получение тестового сообщения
+        logging.getLogger(__name__).info(f"🧪 TEST MESSAGE от {test_user_id}: {message_text[:50]}...")
+        
+        # БЕЗОПАСНО: Используем тот же AI сервис что и основной webhook
+        start_time = time.time()
+        bot_response = ai_service.generate_ai_response(message_text, test_user_id)
+        response_time = time.time() - start_time
+        
+        # Возвращаем структурированный ответ
+        return {
+            "success": True,
+            "user_message": message_text,
+            "bot_response": bot_response,
+            "user_id": test_user_id,
+            "response_time": round(response_time, 3),
+            "timestamp": time.time(),
+            "note": "TEST ENDPOINT - НЕ отправлено в Telegram"
+        }, 200
+        
+    except Exception as e:
+        # Безопасная обработка ошибок
+        logging.getLogger(__name__).error(f"❌ Test endpoint error: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+            "user_message": data.get('message', '') if 'data' in locals() else '',
+            "note": "TEST ENDPOINT ERROR"
+        }, 500
+
+# === КОНЕЦ ТЕСТОВОГО БЛОКА ===
+
 # === ТОЧКА ВХОДА ===
 
 if __name__ == '__main__':
