@@ -822,7 +822,7 @@ def test_message_endpoint():
         
         # БЕЗОПАСНО: Используем тот же AI сервис что и основной webhook
         start_time = time.time()
-        bot_response = ai_service.generate_ai_response(message_text, test_user_id)
+        bot_response = ai_service.handle_message(test_user_id, message_text)
         response_time = time.time() - start_time
         
         # Возвращаем структурированный ответ
