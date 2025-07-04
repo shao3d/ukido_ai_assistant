@@ -9,7 +9,8 @@ from datetime import datetime
 # --- КОНФИГУРАЦИЯ ---
 APP_URL = "https://ukidoaiassistant-production.up.railway.app/test-message"  # НОВЫЙ endpoint!
 SCENARIOS_FILE = "test_scenarios.json"
-TEST_USER_ID = random.randint(10000000, 99999999) 
+# Базовый ID для генерации уникальных user_id для каждого сценария
+TEST_USER_ID_BASE = random.randint(10000000, 99999999)
 
 # --- ЦВЕТА ДЛЯ КРАСИВОГО ВЫВОДА В КОНСОЛЬ ---
 class colors:
@@ -36,13 +37,13 @@ def print_success_message(message):
 def print_error_message(message):
     print(f"{colors.ERROR}❌ {message}{colors.ENDC}")
 
-async def send_test_message(client, message_text):
+async def send_test_message(client, message_text, user_id):
     """
     Отправляет сообщение на специальный test endpoint и получает реальный ответ бота
     """
     test_payload = {
         "message": message_text,
-        "user_id": TEST_USER_ID
+        "user_id": user_id
     }
 
     try:
@@ -156,9 +157,10 @@ async def main():
         return
 
     print_system_message("🚀 ЗАПУСК УЛУЧШЕННОГО ТЕСТИРОВАНИЯ UKIDO AI ASSISTANT")
-    print_system_message(f"📱 Test User ID: {TEST_USER_ID}")
+    print_system_message(f"📱 Base User ID: {TEST_USER_ID_BASE}")
     print_system_message(f"🎯 Target URL: {APP_URL}")
     print_system_message("🔍 Теперь видим РЕАЛЬНЫЕ ответы бота!")
+    print_system_message("🧠 Каждый сценарий = отдельный user_id (изолированные диалоги)")
     print("=" * 80)
 
     # Статистика тестирования
@@ -173,28 +175,24 @@ async def main():
 
     async with httpx.AsyncClient() as client:
         total_scenarios = len(scenarios)
-        
         for idx, scenario in enumerate(scenarios, 1):
+            # АРХИТЕКТУРНО ПРАВИЛЬНО: каждый сценарий получает уникальный user_id
+            scenario_user_id = f"{TEST_USER_ID_BASE}_{idx:02d}"
             print_system_message(f"СЦЕНАРИЙ {idx}/{total_scenarios}: {scenario['scenario_name']}")
-            
+            print_system_message(f"👤 User ID для этого сценария: {scenario_user_id}")
             for step_idx, step in enumerate(scenario['steps'], 1):
                 print(f"\n[{step_idx}/{len(scenario['steps'])}]")
                 print_user_message(step)
-                
                 start_time = time.time()
-                result = await send_test_message(client, step)
+                result = await send_test_message(client, step, scenario_user_id)
                 local_response_time = time.time() - start_time
-                
                 # Используем время ответа от API если есть, иначе локальное
                 response_time = result.get('response_time', local_response_time)
-                
                 stats['total_tests'] += 1
                 stats['total_time'] += response_time
-                
                 if result['success']:
                     stats['successful_tests'] += 1
                     print_bot_message(result['bot_response'], response_time)
-                    
                     # Анализируем качество ответа
                     issues = await analyze_bot_response(step, result['bot_response'])
                     for issue in issues:
@@ -206,20 +204,15 @@ async def main():
                                 stats['fallback_responses'] += 1
                         else:
                             print_system_message(issue)
-                    
                     # Определяем тип ответа
                     if response_time < 1.0:
                         stats['fast_responses'] += 1
                         print_success_message("⚡ БЫСТРЫЙ ответ (возможно fast response)")
-                    
                 else:
                     print_error_message(f"Ошибка: {result['bot_response']}")
-                
                 await asyncio.sleep(1.5)
-            
             print_system_message(f"✅ ЗАВЕРШЕН: {scenario['scenario_name']}")
             print("=" * 80)
-            
             if idx < total_scenarios:
                 await asyncio.sleep(2)
     
