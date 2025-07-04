@@ -256,7 +256,9 @@ class ProductionIntelligentAnalyzer:
             'problem_solving': ['проблема', 'сложно', 'трудно', 'помогите', 'боится', 'застенчив'],
             'philosophical': ['думаю', 'считаю', 'мнение', 'размышляю', 'философия'],
             'sensitive': ['смерть', 'болезнь', 'развод', 'депрессия', 'суицид'],
-            'closing': ['записаться', 'попробовать', 'хочу', 'готов', 'согласен']
+            'closing': ['записаться', 'попробовать', 'хочу', 'готов', 'согласен'],
+            # Добавлено off_topic
+            'off_topic': ['как дела', 'погода', 'новости', 'спорт', 'анекдот', 'привет', 'пока', 'что нового', 'здравствуй']
         }
         
         # Регистрируем cleanup
@@ -312,7 +314,7 @@ class ProductionIntelligentAnalyzer:
             # ИСПРАВЛЕНО: Убран circular import
             result = self._safe_llm_call(micro_prompt).strip().lower()
             
-            valid_categories = ['factual', 'philosophical', 'problem_solving', 'sensitive']
+            valid_categories = ['factual', 'philosophical', 'problem_solving', 'sensitive', 'off_topic']
             if result in valid_categories:
                 self.cache.set(cache_key, result, result)
                 self._update_performance_stats(analysis_start, saved_llm_call=False)

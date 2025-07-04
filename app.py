@@ -225,11 +225,23 @@ class ZhvanetskyHumorLevelSystem:
         else:
             return 'any'
     
-    def get_humor_level(self, user_message: str, basic_category: str) -> str:
-        """Определяет подходящий уровень юмора"""
-        question_detail = self.analyze_question_details(user_message, basic_category)
-        humor_level = self.humor_mapping_rules.get((basic_category, question_detail), 'moderate')
-        self.logger.info(f"🎭 Юмор: {basic_category}.{question_detail} → {humor_level}")
+    def get_humor_level(self, category: str, rag_score: float) -> str:
+        """
+        🎯 НОВАЯ ЛОГИКА: Определяет уровень юмора на основе категории + RAG score
+        """
+        if category == 'factual':
+            humor_level = 'family_safe' if rag_score >= 0.3 else 'no_humor'
+        elif category == 'problem_solving':
+            humor_level = 'moderate' if rag_score >= 0.3 else 'no_humor'
+        elif category == 'philosophical':
+            humor_level = 'sophisticated'  # Всегда sophisticated (порог проверяется в стратегии)
+        elif category == 'sensitive':
+            humor_level = 'no_humor'  # Всегда no_humor
+        elif category == 'off_topic':
+            humor_level = 'family_safe'  # Всегда family_safe
+        else:
+            humor_level = 'moderate'  # Fallback
+        self.logger.info(f"🎭 Юмор: {category} + RAG {rag_score:.2f} → {humor_level}")
         return humor_level
     
     def build_humor_instructions(self, humor_level: str, metaphor_restrictions: str = "") -> str:
@@ -286,27 +298,27 @@ class OptimizedPromptBuilder:
     @staticmethod
     def build_combined_analysis_prompt(user_message: str, current_state: str, 
                                      conversation_history: list, facts_context: str, 
-                                     chat_id: str = "", metaphor_restrictions: str = "") -> str:
+                                     chat_id: str = "", metaphor_restrictions: str = "",
+                                     category: str = "factual", rag_score: float = 0.5) -> str:
         """
-        🎭 НОВАЯ ВЕРСИЯ: С системой градусов юмора Жванецкого
+        🎭 ОБНОВЛЕННАЯ ВЕРСИЯ: С умными стратегиями ответов
         """
         # Инициализируем систему юмора
         humor_system = ZhvanetskyHumorLevelSystem()
         
-        # Получаем базовую категорию от существующей системы (используем intelligent_analyzer)
-        try:
-            basic_category = intelligent_analyzer.analyze_question_category_optimized(user_message)
-        except:
-            basic_category = 'factual'  # fallback
-        
-        # Определяем уровень юмора на основе детального анализа
-        humor_level = humor_system.get_humor_level(user_message, basic_category)
+        # Определяем уровень юмора на основе категории + RAG score
+        humor_level = humor_system.get_humor_level(category, rag_score)
         
         # Создаем инструкции по стилю
         humor_instructions = humor_system.build_humor_instructions(humor_level, metaphor_restrictions)
         
         short_history = '\n'.join(conversation_history[-4:]) if conversation_history else "Начало диалога"
         short_facts = facts_context[:800] + "..." if len(facts_context) > 800 else facts_context
+        
+        # 🎯 УМНЫЕ СТРАТЕГИИ НА ОСНОВЕ КАТЕГОРИИ + RAG SCORE
+        strategy_instructions = OptimizedPromptBuilder._get_strategy_instructions(
+            category, rag_score, user_message, short_facts
+        )
         
         # Определяем тип ответа (сохраняем существующую логику)
         message_lower = user_message.lower()
@@ -328,8 +340,11 @@ class OptimizedPromptBuilder:
 
 {humor_instructions}
 
+{strategy_instructions}
+
 💡 ОПРЕДЕЛЕНО СИСТЕМОЙ:
-• Базовая категория: {basic_category}
+• Категория: {category}
+• RAG Score: {rag_score:.2f}
 • Уровень юмора: {humor_level}  
 • Тип ответа: {response_type}
 
@@ -349,7 +364,7 @@ class OptimizedPromptBuilder:
 КОНТЕКСТ ДИАЛОГА: {short_history}
 СОСТОЯНИЕ: {current_state}
 
-ДОПОЛНИТЕЛЬНЫЕ ФАКТЫ: {short_facts}
+НАЙДЕННАЯ ИНФОРМАЦИЯ: {short_facts}
 
 💡 ИНСТРУКЦИИ ПО ДЛИНЕ ОТВЕТА:
 {response_type}: {"краткий (1-2 предложения)" if response_type == "краткий" else 
@@ -359,8 +374,52 @@ class OptimizedPromptBuilder:
 
 ВОПРОС ПОЛЬЗОВАТЕЛЯ: "{user_message}"
 
-ТВОЙ ОТВЕТ (строго в выбранном стиле юмора):
-"""
+ТВОЙ ОТВЕТ (строго следуй стратегии и стилю):"""
+
+    @staticmethod
+    def _get_strategy_instructions(category: str, rag_score: float, user_message: str, facts_context: str) -> str:
+        """Возвращает специальные инструкции в зависимости от стратегии"""
+        if category == 'factual' and rag_score < 0.3:
+            return """
+🚨 СТРАТЕГИЯ: Честное признание отсутствия информации
+• Прямо скажи, что точной информации по этому вопросу нет
+• Предложи связаться напрямую для получения актуальных данных
+• Предложи пробный урок для знакомства
+• БЕЗ выдумывания фактов или художественных описаний"""
+        elif category == 'problem_solving' and rag_score < 0.3:
+            return """
+🚨 СТРАТЕГИЯ: Поддержка и перенаправление
+• Покажи понимание и эмпатию к проблеме
+• Предложи индивидуальную консультацию или пробный урок для оценки
+• Подчеркни, что у школы есть опыт работы с подобными ситуациями
+• БЕЗ конкретных советов без достаточной информации"""
+        elif category == 'philosophical' and rag_score < 0.2:
+            return """
+🚨 СТРАТЕГИЯ: Размышления с переводом к школе
+• Можешь поделиться общими размышлениями по теме
+• Используй житейскую мудрость и наблюдения
+• Мягко переведи разговор к теме развития детей и школы
+• Подчеркни важность soft skills в современном мире"""
+        elif category == 'sensitive':
+            return """
+🚨 СТРАТЕГИЯ: Осторожность и перенаправление
+• Признай серьезность и деликатность темы
+• Тактично перенаправь к квалифицированным специалистам
+• Предложи контакты детского психолога (если есть)
+• БЕЗ попыток консультирования или советов"""
+        elif category == 'off_topic':
+            return """
+🚨 СТРАТЕГИЯ: Дружелюбное перенаправление
+• Дружелюбно ответь на вопрос в рамках разумного
+• Мягко переведи разговор к теме развития детей
+• Подчеркни, как это связано с образованием и навыками
+• Предложи узнать о курсах школы"""
+        else:
+            return """
+✅ СТРАТЕГИЯ: Уверенный ответ на основе найденной информации
+• Используй найденную информацию как основу ответа
+• Отвечай в заданном стиле юмора
+• Будь информативным и полезным"""
 
 
 class ProductionAIService:
@@ -383,6 +442,17 @@ class ProductionAIService:
             'parallel_processed': 0,
             'avg_response_time': 0,
             'total_time_saved': 0
+        }
+        # 📊 Метрики решений (опционально)
+        self.decision_metrics = {
+            'factual_confident': 0,    # factual + good RAG
+            'factual_uncertain': 0,    # factual + poor RAG  
+            'problem_confident': 0,
+            'problem_redirect': 0,
+            'philosophical_informed': 0,
+            'philosophical_reflect': 0,
+            'sensitive_total': 0,
+            'off_topic_total': 0
         }
         self.stats_lock = threading.Lock()
         
@@ -471,35 +541,43 @@ class ProductionAIService:
             
             # ИСПРАВЛЕНО: Добавляем ограничения на метафоры
             metaphor_restrictions = self.fast_response_cache.get_metaphor_restriction(chat_id)
-            
-            # Single LLM call вместо трех отдельных
+
+            # Определяем категорию и извлекаем RAG score
+            question_category = intelligent_analyzer.analyze_question_category_optimized(user_message)
+            rag_metrics = locals().get('rag_metrics', {})
+            rag_score = rag_metrics.get('best_score', 0.0) if 'rag_metrics' in locals() else 0.0
+
+            # Single LLM call с умными стратегиями
             llm_start = time.time()
             combined_prompt = self.prompt_builder.build_combined_analysis_prompt(
                 user_message, current_state, conversation_history, facts_context, 
-                chat_id, metaphor_restrictions
+                chat_id, metaphor_restrictions, question_category, rag_score
             )
-            
+
+            # Логируем принятое решение
+            self.logger.info(f"📊 Decision: {question_category}, RAG: {rag_score:.2f}")
+
             # Генерируем ответ
             combined_response = self._call_ai_model(combined_prompt)
             llm_time = time.time() - llm_start
-            
+
             # Парсим ответ
             main_response, analysis_data = self._parse_combined_response(combined_response)
-            
+
             # 🚨 КРИТИЧНО: Обрабатываем токены действий с правильными ссылками
             final_response = self._process_action_tokens(main_response, chat_id, current_state)
-            
+
             # Отслеживаем использованные метафоры
             self.fast_response_cache.track_metaphor_usage(chat_id, final_response)
-            
+
             # Обновляем историю
             conversation_manager.update_conversation_history(chat_id, user_message, final_response)
             conversation_manager.set_dialogue_state(chat_id, analysis_data.get('state', current_state))
-            
+
             # Обновляем статистику
             total_time = time.time() - start_time
             self._update_performance_stats(total_time, parallel_time, llm_time)
-            
+
             self.logger.info(f"✅ Ответ сгенерирован для {chat_id} за {total_time:.3f}s")
             return final_response
             
