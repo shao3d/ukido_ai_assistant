@@ -306,19 +306,25 @@ class ProductionAIService:
             
             # Parallel processing для независимых операций
             def get_rag_context():
-                return rag_system.get_relevant_context(user_message)
+                context, metrics = rag_system.search_knowledge_base(user_message)
+                return context
             
             def get_conversation_history():
                 return conversation_manager.get_conversation_history(chat_id)
             
             # Запускаем параллельно
-            with self.executor as executor:
-                rag_future = executor.submit(get_rag_context)
-                history_future = executor.submit(get_conversation_history)
+            try:
+                rag_future = self.executor.submit(get_rag_context)
+                history_future = self.executor.submit(get_conversation_history)
                 
                 # Собираем результаты
                 facts_context = rag_future.result(timeout=5)
                 conversation_history = history_future.result(timeout=3)
+            except Exception as e:
+                # Fallback при проблемах с параллельной обработкой
+                self.logger.error(f"Parallel processing error: {e}")
+                facts_context = "Информация временно недоступна."
+                conversation_history = []
             
             parallel_time = time.time() - start_time
             
