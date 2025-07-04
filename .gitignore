@@ -1,1 +1,16 @@
-venv/__pycache__/*.pyc.envkeys.txt.vscode/data_style_old/*.pdf
+﻿# Python
+venv/
+__pycache__/
+*.pyc
+
+# Secrets
+.env
+keys.txt
+
+# Editor
+.vscode/
+
+# Backups
+data_facts_old/
+app_backup.py
+*.pdf
