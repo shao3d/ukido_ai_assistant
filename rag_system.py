@@ -159,7 +159,7 @@ class RAGSystem:
             metrics = {
                 'search_time': time.time() - search_start,
                 'chunks_found': len(relevant_chunks),
-                'max_score': max([m.score for m in top_matches]) if top_matches else 0
+                'max_score': max([m.score for m in search_results.matches]) if search_results.matches else 0
             }
             
             # Кешируем результат
