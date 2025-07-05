@@ -336,7 +336,7 @@ class RAGSystem:
             def _pinecone_search():
                 return index.query(
                     vector=query_embedding,
-                    top_k=5,
+                    top_k=7,
                     include_metadata=True
                 )
             
