@@ -141,7 +141,7 @@ class RAGSystem:
             # Простое увеличение количества чанков БЕЗ сжатия
             search_results = index.query(
                 vector=query_embedding,
-                top_k=10,  # Увеличиваем с 8 до 10
+                top_k=15,  # Увеличиваем с 8 до 10
                 include_metadata=True
             )
             
