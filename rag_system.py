@@ -354,14 +354,9 @@ class RAGSystem:
                     self.stats['circuit_breaker_blocks'] += 1
                 return fallback_context, fallback_metrics
             
-            # Обрабатываем результаты
-            relevant_chunks = []
-            for match in search_results.matches:
-                if match.score > 0.3:  # Порог релевантности
-                    relevant_chunks.append(match.metadata.get('text', ''))
-            
+            # Обрабатываем результаты (надежная версия без хрупкого фильтра)
+            relevant_chunks = [match.metadata.get('text', '') for match in search_results.matches]
             context = '\n\n'.join(relevant_chunks) if relevant_chunks else "Релевантная информация не найдена."
-            
             metrics = {
                 'search_time': time.time() - search_start,
                 'chunks_found': len(relevant_chunks),
