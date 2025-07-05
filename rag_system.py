@@ -341,6 +341,14 @@ class RAGSystem:
                 )
             
             search_results = self.pinecone_circuit_breaker.call(_pinecone_search)
+            # ДИАГНОСТИКА: Логируем что именно нашел RAG
+            self.logger.info(f"🔍 [RAG ДИАГНОСТИКА] Искали: '{query}'")
+            if search_results is not None:
+                self.logger.info(f"📊 [RAG ДИАГНОСТИКА] Найдено чанков: {len(search_results.matches)}")
+                # Логируем первые 3 чанка для анализа
+                for i, match in enumerate(search_results.matches[:3]):
+                    chunk_preview = match.metadata.get('text', '')[:100] + "..."
+                    self.logger.info(f"📄 [RAG CHUNK {i+1}] Score: {match.score:.3f} | Preview: {chunk_preview}")
             if search_results is None:
                 # Circuit Breaker заблокировал запрос
                 fallback_context = "Поиск в базе знаний временно недоступен."

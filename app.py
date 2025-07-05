@@ -294,6 +294,30 @@ class ZhvanetskyHumorLevelSystem:
 
 
 class OptimizedPromptBuilder:
+
+    def build_combined_analysis_prompt_RAG_TEST(self, user_message: str, 
+                                               facts_context: str,
+                                               rag_score: float) -> str:
+        """
+        ВРЕМЕННЫЙ УПРОЩЕННЫЙ ПРОМПТ для тестирования чистого RAG.
+        Убраны все сложности: юмор, состояния, стратегии.
+        
+        Цель: проверить, находит ли RAG правильную информацию.
+        """
+        return f"""Ты AI-ассистент онлайн-школы Ukido для развития soft skills у детей.
+
+📚 ИНФОРМАЦИЯ ИЗ БАЗЫ ЗНАНИЙ (RAG Score: {rag_score:.2f}):
+{facts_context}
+
+❓ ВОПРОС ПОЛЬЗОВАТЕЛЯ: {user_message}
+
+📋 ИНСТРУКЦИИ:
+1. Если в базе знаний ЕСТЬ точный ответ - приведи его дословно с конкретными фактами
+2. Если информации НЕТ - честно скажи: "К сожалению, в моей базе знаний нет информации по этому вопросу"
+3. НЕ выдумывай факты, которых нет в предоставленном контексте
+4. Отвечай кратко и по существу
+
+Ответ:"""
     """
     🚨 ИСПРАВЛЕНО: Промпты без "Ответ:", "ну", с правильным форматированием
     🎭 Новая версия с системой градусов юмора Жванецкого
@@ -555,15 +579,20 @@ class ProductionAIService:
             question_category = intelligent_analyzer.analyze_question_category_optimized(user_message)
             rag_score = rag_metrics.get('max_score', 0.0) if 'rag_metrics' in locals() else 0.0
 
-            # Single LLM call с умными стратегиями
+
+            # ВРЕМЕННО: Используем упрощенный промпт для тестирования RAG
             llm_start = time.time()
-            combined_prompt = self.prompt_builder.build_combined_analysis_prompt(
-                user_message, current_state, conversation_history, facts_context, 
-                chat_id, metaphor_restrictions, question_category, rag_score
+            combined_prompt = self.prompt_builder.build_combined_analysis_prompt_RAG_TEST(
+                user_message=user_message,
+                facts_context=facts_context,
+                rag_score=rag_metrics.get('average_score', 0.5)
             )
 
+            # TODO: После успешного тестирования вернуть обратно:
+            # combined_prompt = self.prompt_builder.build_combined_analysis_prompt(...)
+
             # Логируем принятое решение
-            self.logger.info(f"📊 Decision: {question_category}, RAG: {rag_score:.2f}")
+            self.logger.info(f"📊 [RAG TEST] Decision: {question_category}, RAG: {rag_score:.2f}")
 
             # Генерируем ответ
             combined_response = self._call_ai_model(combined_prompt)
