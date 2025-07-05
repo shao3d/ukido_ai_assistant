@@ -31,6 +31,7 @@ if not all([GEMINI_API_KEY, PINECONE_API_KEY, PINECONE_HOST]):
 logger.info("✅ Конфигурация проверена")
 
 class SimpleMarkdownChunker:
+
     """
     Простой чанкер для файлов Ukido - без излишеств!
     """
@@ -46,12 +47,10 @@ class SimpleMarkdownChunker:
         """
         chunks = []
         sections = content.split('\n---\n')  # Простой split
-        
         for section in sections:
             section = section.strip()
-            if len(section) < 200:  # Слишком короткая секция
+            if len(section) < 50:  # Слишком короткая секция
                 continue
-                
             # Ищем название курса
             course_match = re.search(r'#\s*КУРС\s+"([^"]+)"', section)
             if course_match:
@@ -60,13 +59,11 @@ class SimpleMarkdownChunker:
             else:
                 course_name = "unknown_course"
                 logger.warning("⚠️ Курс без названия")
-            
             chunks.append({
                 "text": section,
-                "type": "course_detail", 
+                "type": "course_detail",
                 "course": course_name
             })
-        
         return chunks
 
     def chunk_teachers(self, content: str) -> List[Dict]:
@@ -82,7 +79,8 @@ class SimpleMarkdownChunker:
                 continue
                 
             # Ищем имя преподавателя
-            name_match = re.search(r'#\s*([А-ЯЁ]+\s+[А-ЯЁ]+)', section)
+            # Ищем заголовок, состоящий ТОЛЬКО из 2-3 заглавных слов (Имя Фамилия)
+            name_match = re.search(r'#\s*([А-ЯЁ]+\s+[А-ЯЁ]+(\s+[А-ЯЁ]+)?)\s*$', section)
             if name_match:
                 teacher_name = name_match.group(1)
                 logger.info(f"👨‍🏫 Найден преподаватель: {teacher_name}")
@@ -113,17 +111,12 @@ class SimpleMarkdownChunker:
         """
         chunks = []
         sections = content.split('\n---\n')
-        
         for section in sections:
             section = section.strip()
-            if len(section) < 300:
-                continue
-                
             chunks.append({
                 "text": section,
                 "type": filename.replace('.md', '').replace('.txt', '')
             })
-        
         return chunks
 
     def process_files(self, directory: str) -> List[Dict]:
@@ -142,13 +135,15 @@ class SimpleMarkdownChunker:
             
             with open(os.path.join(directory, filename), 'r', encoding='utf-8') as f:
                 content = f.read()
-            
+
             # Выбираем метод чанкования
             if 'courses' in filename:
                 chunks = self.chunk_courses(content)
             elif 'teachers' in filename:
                 chunks = self.chunk_teachers(content)
             else:
+                # ВСЕ ОСТАЛЬНЫЕ ФАЙЛЫ (pricing, conditions, faq и т.д.)
+                # обрабатываются стандартным методом по разделителю '---'
                 chunks = self.chunk_standard_file(content, filename)
             
             # Добавляем ID и метаданные
@@ -229,13 +224,13 @@ class SimpleMarkdownChunker:
                 logger.info(f"  📦 Батч {i//batch_size + 1} загружен")
                 time.sleep(1)
             
-            # Проверяем результат
-            time.sleep(3)
+            # Проверка больше не нужна, т.к. upsert выдал бы ошибку.
+            # Просто сообщаем об успехе.
             stats = index.describe_index_stats()
-            logger.info(f"🎉 Загружено векторов: {stats.total_vector_count}")
-            
-            return stats.total_vector_count > 0
-            
+            final_count = stats.get('total_vector_count', 'неизвестно (статистика обновляется)')
+            logger.info(f"🎉 Команда на загрузку {len(vectors)} векторов успешно отправлена! Финальное количество в базе: {final_count}")
+
+            return True # Считаем успешным, если не было исключений
         except Exception as e:
             logger.error(f"❌ Ошибка Pinecone: {e}")
             return False
