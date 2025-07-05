@@ -316,7 +316,14 @@ class OptimizedPromptBuilder:
         # Создаем инструкции по стилю
         humor_instructions = humor_system.build_humor_instructions(humor_level, metaphor_restrictions)
         
+
         short_history = '\n'.join(conversation_history[-4:]) if conversation_history else "Начало диалога"
+        # НОВЫЙ БЛОК: Динамическая инструкция для приветствия
+        if not conversation_history or len(conversation_history) == 0:
+            greeting_instruction = "📝 НАЧАЛО ДИАЛОГА: Начни ответ с вежливого приветствия ('Добрый день!', 'Здравствуйте!')."
+        else:
+            greeting_instruction = "📝 ПРОДОЛЖЕНИЕ ДИАЛОГА: НЕ используй приветствия ('Добрый день', 'Здравствуйте'). Сразу переходи к ответу по сути."
+        # КОНЕЦ НОВОГО БЛОКА
         short_facts = facts_context[:800] + "..." if len(facts_context) > 800 else facts_context
         
         # 🎯 УМНЫЕ СТРАТЕГИИ НА ОСНОВЕ КАТЕГОРИИ + RAG SCORE
@@ -341,6 +348,8 @@ class OptimizedPromptBuilder:
         
         # Создаем итоговый промпт
         return f"""Ты AI-ассистент онлайн-школы Ukido для развития soft-skills у детей.
+
+{greeting_instruction}
 
 {humor_instructions}
 
