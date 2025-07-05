@@ -1,3 +1,39 @@
+    def _rerank_chunks_by_keywords(self, query: str, matches: list) -> list:
+        """
+        Переранжирование чанков по наличию ключевых слов из запроса.
+        Это помогает поднять наверх чанки с точными совпадениями.
+        """
+        query_words = query.lower().split()
+        scored_matches = []
+        for match in matches:
+            chunk_text = match.metadata.get('text', '').lower()
+            keyword_score = 0
+            for word in query_words:
+                if len(word) > 3:
+                    keyword_score += chunk_text.count(word)
+            if "дмитрий" in query_words and "дмитрий" in chunk_text:
+                keyword_score += 5
+            if "петров" in query_words and "петров" in chunk_text:
+                keyword_score += 5
+            scored_matches.append((match, keyword_score))
+        scored_matches.sort(key=lambda x: (x[1], x[0].score), reverse=True)
+        return [match for match, _ in scored_matches]
+
+    def _extract_relevant_sentences(self, chunk_text: str, query: str) -> str:
+        """
+        Извлекает только предложения, содержащие ключевые слова из запроса.
+        Это уменьшает размер контекста без потери важной информации.
+        """
+        sentences = chunk_text.split('.')
+        query_words = set(word.lower() for word in query.split() if len(word) > 3)
+        relevant_sentences = []
+        for sentence in sentences:
+            sentence_lower = sentence.lower()
+            if any(word in sentence_lower for word in query_words):
+                relevant_sentences.append(sentence.strip())
+        if not relevant_sentences and sentences:
+            relevant_sentences = sentences[:2]
+        return '. '.join(relevant_sentences) + '.'
 # rag_system.py
 """
 Модуль для работы с RAG (Retrieval-Augmented Generation) системой.
@@ -333,24 +369,23 @@ class RAGSystem:
                 return fallback_context, fallback_metrics
             
             # Выполняем поиск в Pinecone с Circuit Breaker
+
+            # Получаем больше кандидатов для reranking
             def _pinecone_search():
                 return index.query(
                     vector=query_embedding,
-                    top_k=7,
+                    top_k=12,  # Берем 12 кандидатов
                     include_metadata=True
                 )
-            
+
             search_results = self.pinecone_circuit_breaker.call(_pinecone_search)
-            # ДИАГНОСТИКА: Логируем что именно нашел RAG
             self.logger.info(f"🔍 [RAG ДИАГНОСТИКА] Искали: '{query}'")
             if search_results is not None:
                 self.logger.info(f"📊 [RAG ДИАГНОСТИКА] Найдено чанков: {len(search_results.matches)}")
-                # Логируем первые 3 чанка для анализа
                 for i, match in enumerate(search_results.matches[:3]):
                     chunk_preview = match.metadata.get('text', '')[:100] + "..."
                     self.logger.info(f"📄 [RAG CHUNK {i+1}] Score: {match.score:.3f} | Preview: {chunk_preview}")
             if search_results is None:
-                # Circuit Breaker заблокировал запрос
                 fallback_context = "Поиск в базе знаний временно недоступен."
                 fallback_metrics = {
                     'search_time': time.time() - search_start,
@@ -361,24 +396,42 @@ class RAGSystem:
                     self.stats['failed_queries'] += 1
                     self.stats['circuit_breaker_blocks'] += 1
                 return fallback_context, fallback_metrics
-            
-            # Обрабатываем результаты (надежная версия без хрупкого фильтра)
-            relevant_chunks = [match.metadata.get('text', '') for match in search_results.matches]
+
+            # Переранжируем по ключевым словам
+            reranked_matches = self._rerank_chunks_by_keywords(query, search_results.matches)
+            # Берем только ТОП-5 после переранжирования
+            top_matches = reranked_matches[:5]
+
+            # Собираем релевантные чанки со сжатием
+            relevant_chunks = []
+            total_length = 0
+            MAX_CONTEXT_LENGTH = 1500  # Оставляем место для промпта и истории!
+
+            for i, match in enumerate(top_matches):
+                chunk_text = match.metadata.get('text', '')
+                # Извлекаем только релевантные предложения
+                compressed_chunk = self._extract_relevant_sentences(chunk_text, query)
+                # Добавляем только если помещается в лимит
+                if total_length + len(compressed_chunk) < MAX_CONTEXT_LENGTH:
+                    relevant_chunks.append(compressed_chunk)
+                    total_length += len(compressed_chunk)
+                    self.logger.info(f"✂️ [СЖАТИЕ] Чанк {i+1}: {len(chunk_text)} → {len(compressed_chunk)} символов")
+
             context = '\n\n'.join(relevant_chunks) if relevant_chunks else "Релевантная информация не найдена."
             metrics = {
                 'search_time': time.time() - search_start,
                 'chunks_found': len(relevant_chunks),
-                'max_score': max([m.score for m in search_results.matches]) if search_results.matches else 0,
+                'max_score': max([m.score for m in top_matches]) if top_matches else 0,
                 'pinecone_available': self.pinecone_available
             }
-            
+
             # Кешируем результат
             result = (context, metrics)
             self._cache_result(cache_key, result)
-            
+
             with self.stats_lock:
                 self.stats['successful_queries'] += 1
-            
+
             self.logger.info(f"🔍 RAG поиск выполнен: {len(relevant_chunks)} чанков за {metrics['search_time']:.2f}с")
             return result
             
