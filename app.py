@@ -544,7 +544,7 @@ class ProductionAIService:
 
             # Определяем категорию и извлекаем RAG score
             question_category = intelligent_analyzer.analyze_question_category_optimized(user_message)
-            rag_score = rag_metrics.get('best_score', 0.0) if 'rag_metrics' in locals() else 0.0
+            rag_score = rag_metrics.get('max_score', 0.0) if 'rag_metrics' in locals() else 0.0
 
             # Single LLM call с умными стратегиями
             llm_start = time.time()
