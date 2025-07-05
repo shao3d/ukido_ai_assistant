@@ -138,32 +138,22 @@ class RAGSystem:
             if index is None:
                 return self._fallback_response("pinecone_error", search_start)
             
-            # Поиск в Pinecone
+            # Простое увеличение количества чанков БЕЗ сжатия
             search_results = index.query(
                 vector=query_embedding,
-                top_k=8,
+                top_k=10,  # Увеличиваем с 8 до 10
                 include_metadata=True
             )
             
             if not search_results.matches:
                 return self._fallback_response("no_results", search_start)
             
-            # Переранжирование и обработка
-            reranked_matches = self._rerank_chunks_by_keywords(query, search_results.matches)
-            top_matches = reranked_matches[:5]
-            
-            # Собираем контекст
+            # Собираем ВСЕ чанки без сжатия
             relevant_chunks = []
-            total_length = 0
-            MAX_CONTEXT_LENGTH = 1500
-            
-            for match in top_matches:
+            for match in search_results.matches:
                 chunk_text = match.metadata.get('text', '')
-                compressed_chunk = self._extract_relevant_sentences(chunk_text, query)
-                
-                if total_length + len(compressed_chunk) < MAX_CONTEXT_LENGTH:
-                    relevant_chunks.append(compressed_chunk)
-                    total_length += len(compressed_chunk)
+                if chunk_text:
+                    relevant_chunks.append(chunk_text)
             
             context = '\n\n'.join(relevant_chunks) if relevant_chunks else "Релевантная информация не найдена."
             metrics = {
