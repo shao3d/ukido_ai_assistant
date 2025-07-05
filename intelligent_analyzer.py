@@ -413,128 +413,20 @@ class ProductionIntelligentAnalyzer:
     def enrich_query_with_context(self, query: str, conversation_history: List[str] = None) -> str:
         """
         ВРЕМЕННО ОТКЛЮЧЕНО: Передаем запрос без изменений для тестирования чистого RAG.
-        
+
         TODO: После тестирования решить - нужно ли обогащение вообще.
         Если да - реализовать умное контекстное обогащение, а не словарь замен.
-        
+
         Args:
             query: Оригинальный запрос пользователя
             conversation_history: История диалога (временно не используется)
-            
+
         Returns:
             str: Оригинальный запрос без изменений
         """
         self.logger.info(f"🔍 [ОБОГАЩЕНИЕ ОТКЛЮЧЕНО] Передаем оригинальный запрос: '{query}'")
-        
         # ВАЖНО: Возвращаем запрос КАК ЕСТЬ
         return query
-            'опыт': 'опыт работы преподавателей Ukido квалификация',
-            'возраст': 'возрастные группы Ukido дети программы курсы 7-10 лет 9-12 лет 11-14 лет',
-            'скидк': 'скидки акции Ukido цены условия',
-            'партнер': 'партнеры Ukido сотрудничество EPAM университеты'
-        }
-        for key, enrichment in query_enrichment_map.items():
-            if key in query.lower():
-                self.logger.info(f"✨ Обогащение по ключу '{key}': {enrichment}")
-                return enrichment
-
-        # Проверяем наличие истории диалога
-        if not conversation_history or len(conversation_history) < 2:
-            self.logger.info("📝 Недостаточно истории для обогащения")
-            return query
-
-        # Генерируем ключ кеша
-        recent_history = conversation_history[-3:] if len(conversation_history) >= 3 else conversation_history
-        history_text = ' '.join(recent_history)
-        cache_key = self._generate_fast_cache_key(f"{query}|{history_text}", "enrich")
-
-        # 1. ПРАВИЛЬНАЯ ПРОВЕРКА КЕША
-        cached_result = self.cache.get(cache_key)
-        if cached_result is not None:
-            self.logger.info(f"💾 Обогащенный запрос из кеша: {cached_result}")
-            return cached_result
-
-        # Быстрая проверка: длинные запросы обычно уже содержат контекст
-        if len(query.split()) >= 4:
-            self.logger.info(f"🔍 Запрос достаточно длинный, обогащение не требуется: {query}")
-            return query
-
-        # 2. НАДЕЖНЫЙ ВЫЗОВ LLM С ЗАЩИТОЙ
-        micro_prompt = f"""Диалог: {' | '.join(recent_history[-2:])}
-Вопрос: "{query}"Сделай вопрос полным для поиска в базе школы Ukido.Примеры: "Цена?" → "Цена курса Юный Оратор", "Кто ведет?" → "Преподаватели Ukido"Полный вопрос:"""
-        try:
-            enriched_query = self._safe_llm_call_for_enrichment(micro_prompt)
-            
-            # Проверяем, что LLM вернул валидную строку
-            if enriched_query and isinstance(enriched_query, str) and len(enriched_query.strip()) > 0:
-                enriched_query = enriched_query.strip()
-                self.logger.info(f"✨ Запрос обогащен: '{query}' → '{enriched_query}'")
-                self.cache.set(cache_key, enriched_query, 'factual')
-                return enriched_query
-            else:
-                # LLM вернул пустоту - используем оригинальный query
-                self.logger.warning(f"⚠️ LLM вернул пустой ответ, используем оригинал: {query}")
-                self.cache.set(cache_key, query, 'factual') # Кешируем, чтобы не спрашивать снова
-                return query
-                
-        except Exception as e:
-            # При любой ошибке возвращаем оригинальный query
-            self.logger.error(f"❌ Ошибка обогащения запроса: {e}")
-            self.cache.set(cache_key, query, 'factual') # Кешируем, чтобы не спрашивать снова
-            return query
-        for key, enrichment in query_enrichment_map.items():
-            if key in query.lower():
-                self.logger.info(f"✨ Обогащение по ключу '{key}': {enrichment}")
-                return enrichment
-        # Проверяем наличие истории диалога
-        if not conversation_history or len(conversation_history) < 2:
-            self.logger.info("📝 Недостаточно истории для обогащения")
-            return query
-        # Генерируем ключ кеша
-        recent_history = conversation_history[-3:] if len(conversation_history) >= 3 else conversation_history
-        history_text = ' '.join(recent_history)
-        cache_key = self._generate_fast_cache_key(f"{query}|{history_text}", "enrich")
-        # Проверяем кеш
-        cached_result = self.cache.get(cache_key, query)
-        if cached_result != query:  # Если нашли обогащенную версию в кеше
-            with self.performance_lock:
-                self.performance_stats['cache_hits'] += 1
-            self._update_performance_stats(analysis_start, saved_llm_call=True)
-            self.logger.info(f"💾 Обогащенный запрос из кеша: {cached_result}")
-            return cached_result
-        # Быстрая проверка: короткий ли запрос (требует обогащения)
-        query_words = query.split()
-        if len(query_words) >= 4:  # Длинные запросы обычно уже содержат контекст
-            self.logger.info(f"🔍 Запрос достаточно длинный, обогащение не требуется: {query}")
-            return query
-        # Micro-prompt для универсального обогащения
-        with self.performance_lock:
-            self.performance_stats['llm_calls_made'] += 1
-        # Оптимизированный micro-prompt (сокращен в 3 раза для скорости)
-        micro_prompt = f"""Диалог: {' | '.join(recent_history[-2:])}
-Вопрос: \"{query}\"
-Сделай вопрос полным для поиска в базе школы Ukido.
-Примеры: \"Цена?\" → \"Цена курса Юный Оратор\", \"Кто ведет?\" → \"Преподаватели Ukido\"
-Полный вопрос:
-        """
-        try:
-            enriched_query = self._safe_llm_call_for_enrichment(micro_prompt).strip()
-            # Валидация результата
-            if not enriched_query or len(enriched_query) > 200 or enriched_query == query:
-                # Fallback к оригинальному запросу
-                enriched_query = query
-                self.logger.info(f"🔄 Fallback к оригинальному запросу: {query}")
-            else:
-                self.logger.info(f"✨ Запрос обогащен: '{query}' → '{enriched_query}'")
-            # Кешируем результат
-            self.cache.set(cache_key, enriched_query, 'factual')
-            self._update_performance_stats(analysis_start, saved_llm_call=False)
-            return enriched_query
-        except Exception as e:
-            self.logger.error(f"Ошибка обогащения запроса: {e}")
-            # Graceful degradation - возвращаем оригинальный запрос
-            self._update_performance_stats(analysis_start, saved_llm_call=False)
-            return query
 
     def _safe_llm_call_for_enrichment(self, prompt: str) -> str:
         """
