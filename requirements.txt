@@ -1,8 +1,16 @@
-Flask==2.3.3
-python-dotenv==1.0.0
-google-generativeai==0.3.2
-requests==2.31.0
-pinecone==3.1.0
-hubspot-api-client==9.0.0
-redis==4.6.0
-gunicorn==22.0.0  
+# Основные зависимости проекта
+Flask
+python-dotenv
+google-generativeai
+requests
+hubspot-api-client
+redis
+gunicorn
+
+# --- LlamaIndex и все необходимые плагины ---
+pinecone-client
+llama-index
+llama-index-embeddings-gemini
+llama-index-llms-openrouter
+llama-index-vector-stores-pinecone
+llama-index-postprocessor-sentence-transformers
