@@ -1,9 +1,4 @@
-# llamaindex_rag.py (Версия для тестирования gpt-4o-mini с исправленным импортом)
-"""
-Модуль для работы с RAG системой на базе LlamaIndex.
-Используется в основном приложении (app.py) для поиска по базе знаний.
-Включает реранкер для максимальной точности.
-"""
+# llamaindex_rag.py (ФИНАЛЬНАЯ ВЕРСИЯ с обработкой лимитов API)
 import logging
 import time
 from typing import Tuple, Dict, Any
@@ -11,12 +6,15 @@ from typing import Tuple, Dict, Any
 import pinecone
 from llama_index.core import VectorStoreIndex, Settings
 from llama_index.vector_stores.pinecone import PineconeVectorStore
-from llama_index.llms.openrouter import OpenRouter
+from llama_index.llms.gemini import Gemini
 from llama_index.embeddings.gemini import GeminiEmbedding
-# --- ИСПРАВЛЕННЫЙ ИМПОРТ ---
 from llama_index.postprocessor.sbert_rerank import SentenceTransformerRerank
 
-# Попытка импортировать 'config' из родительской директории
+# --- НОВЫЙ БЛОК: Импорты для обработки лимитов ---
+from tenacity import retry, stop_after_attempt, wait_exponential
+from google.api_core.exceptions import ResourceExhausted
+# -------------------------------------------------
+
 try:
     from config import config
 except ImportError:
@@ -25,10 +23,10 @@ except ImportError:
     sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
     from config import config
 
-
 class LlamaIndexRAG:
     """
-    Класс для работы с RAG системой на базе LlamaIndex с реранкером.
+    Отказоустойчивый класс для работы с RAG системой, который умеет
+    обрабатывать лимиты API Gemini.
     """
     def __init__(self):
         self.logger = logging.getLogger(__name__)
@@ -36,47 +34,41 @@ class LlamaIndexRAG:
         self.query_engine = None
 
         try:
-            # 1. Настройка моделей
-            Settings.embed_model = GeminiEmbedding(
-                model_name=config.EMBEDDING_MODEL, api_key=config.GEMINI_API_KEY
-            )
-            Settings.llm = OpenRouter(
-                api_key=config.OPENROUTER_API_KEY,
-                model="openai/gpt-4o-mini",
-                max_tokens=2048,
-                temperature=0.2,
-            )
+            # Настройка моделей
+            Settings.embed_model = GeminiEmbedding(model_name=config.EMBEDDING_MODEL, api_key=config.GEMINI_API_KEY)
+            Settings.llm = Gemini(model_name="models/gemini-1.5-pro-latest", api_key=config.GEMINI_API_KEY)
 
-            # 2. Подключение к Pinecone
+            # Подключение к Pinecone
             pc = pinecone.Pinecone(api_key=config.PINECONE_API_KEY)
             pinecone_index = pc.Index(self.pinecone_index_name)
-
-            # 3. Создание VectorStore
             vector_store = PineconeVectorStore(pinecone_index=pinecone_index)
             index = VectorStoreIndex.from_vector_store(vector_store=vector_store)
 
-            # 4. Настройка реранкера
-            # 🔥 ИСПОЛЬЗУЕМ КЛАСС ИЗ ПРАВИЛЬНОГО ИМПОРТА
-            reranker = SentenceTransformerRerank(
-                model="cross-encoder/ms-marco-MiniLM-L-2-v2", # Используем рекомендованную модель
-                top_n=4
-            )
+            # Настройка реранкера
+            reranker = SentenceTransformerRerank(model="cross-encoder/ms-marco-MiniLM-L-2-v2", top_n=4)
 
-            # 5. Создание Query Engine
+            # Создание Query Engine
             self.query_engine = index.as_query_engine(
                 similarity_top_k=15,
                 node_postprocessors=[reranker]
             )
 
-            self.logger.info("✅ LlamaIndex RAG система с реранкером успешно инициализирована (модель: gpt-4o-mini)")
+            self.logger.info("✅ LlamaIndex RAG система с реранкером успешно инициализирована (модель: Gemini 1.5 Pro)")
 
         except Exception as e:
             self.logger.error(f"❌ Ошибка при инициализации LlamaIndex RAG: {e}", exc_info=True)
             raise
 
+    # --- 🔥 КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: Декоратор для обработки лимитов 🔥 ---
+    @retry(
+        wait=wait_exponential(multiplier=2, min=5, max=30), # Ждем 5с, потом 10с, потом 20с, макс 30с
+        stop=stop_after_attempt(4), # Делаем 4 попытки
+        retry_error_callback=lambda state: logging.warning(f"Достигнут лимит API Gemini. Попытка #{state.attempt_number}, ждем..."),
+        retry=retry_if_exception_type(ResourceExhausted) # Повторяем только при ошибке лимита
+    )
     def search_knowledge_base(self, query: str) -> Tuple[str, Dict[str, Any]]:
         """
-        Поиск в базе знаний с использованием LlamaIndex.
+        Поиск в базе знаний с автоматической обработкой лимитов API.
         """
         search_start = time.time()
         if not self.query_engine:
@@ -85,6 +77,7 @@ class LlamaIndexRAG:
 
         try:
             self.logger.info(f"🔍 LlamaIndex RAG: Поиск по запросу: '{query}'")
+            # Этот вызов теперь защищен декоратором @retry
             response = self.query_engine.query(query)
 
             context_chunks = [node.get_content() for node in response.source_nodes]
@@ -104,11 +97,18 @@ class LlamaIndexRAG:
             self.logger.info(f"✅ LlamaIndex RAG: Найдено {metrics['chunks_found']} чанков за {search_time:.2f}с")
             return context, metrics
 
+        except ResourceExhausted as e:
+            # Этот блок сработает, если все 4 попытки не увенчались успехом
+            self.logger.error(f"❌ Не удалось выполнить запрос к Gemini после нескольких попыток: {e}")
+            return "К сожалению, сервер AI сейчас перегружен. Пожалуйста, повторите ваш запрос через минуту.", {}
         except Exception as e:
             self.logger.error(f"❌ Ошибка во время поиска LlamaIndex RAG: {e}", exc_info=True)
-            return f"К сожалению, произошла ошибка при поиске информации: {e}", {}
+            return f"К сожалению, произошла внутренняя ошибка при поиске информации.", {}
 
-# Создаем глобальный экземпляр
+# Вспомогательная функция для декоратора
+def retry_if_exception_type(exception_type):
+    return lambda e: isinstance(e, exception_type)
+
 try:
     llama_index_rag = LlamaIndexRAG()
 except Exception as e:
