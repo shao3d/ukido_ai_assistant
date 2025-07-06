@@ -58,8 +58,8 @@ async def send_test_message(client, message_text, user_id):
     test_payload = {"message": message_text, "user_id": user_id}
 
     try:
-        # Увеличим таймаут, т.к. Gemini 1.5 Pro может отвечать дольше
-        response = await client.post(test_endpoint_url, json=test_payload, timeout=60.0)
+        # ✅ ИСПРАВЛЕНО: Таймаут для GPT-4o mini (быстрее чем Gemini)
+        response = await client.post(test_endpoint_url, json=test_payload, timeout=30.0)
         
         if response.status_code == 200:
             result = response.json()
@@ -72,12 +72,13 @@ async def send_test_message(client, message_text, user_id):
             return {'success': False, 'bot_response': f"HTTP ошибка: {response.status_code} {response.text}"}
             
     except httpx.TimeoutException:
-        return {'success': False, 'bot_response': "❌ Таймаут: Gemini 1.5 Pro может отвечать долго. Попробуйте еще раз."}
+        # ✅ ИСПРАВЛЕНО: Обновленное сообщение про GPT-4o mini
+        return {'success': False, 'bot_response': "❌ Таймаут: GPT-4o mini отвечает дольше обычного. Попробуйте еще раз."}
     except httpx.RequestError as exc:
         return {'success': False, 'bot_response': f"❌ Ошибка подключения: {exc}"}
 
 async def main():
-    """✅ ИСПРАВЛЕНО: Главная функция с очисткой памяти перед каждым сценарием"""
+    """✅ УНИВЕРСАЛЬНАЯ ФУНКЦИЯ: Автоматически адаптируется к любому количеству сценариев"""
     
     # Загружаем сценарии тестирования
     try:
@@ -86,19 +87,22 @@ async def main():
     except FileNotFoundError:
         print_error_message(f"Файл сценариев '{SCENARIOS_FILE}' не найден.")
         return
-
+    
+    # ✅ АВТОМАТИЧЕСКОЕ ОПРЕДЕЛЕНИЕ КОЛИЧЕСТВА СЦЕНАРИЕВ
+    total_scenarios = len(scenarios)
+    
     print_system_message("🚀 ЗАПУСК ТЕСТИРОВАНИЯ UKIDO AI ASSISTANT (ЛОКАЛЬНЫЙ РЕЖИМ)")
     print_system_message(f"🎯 Target URL: {APP_URL}")
     print_system_message(f"📁 Сценарии: {SCENARIOS_FILE}")
+    print_system_message(f"📊 Обнаружено сценариев: {total_scenarios}")
     print("=" * 80)
 
     async with httpx.AsyncClient() as client:
-        # ✅ ИСПРАВЛЕНО: Глобальная очистка в начале тестирования
+        # ✅ ГЛОБАЛЬНАЯ ОЧИСТКА в начале тестирования
         await clear_server_memory(client, "НАЧАЛО ТЕСТИРОВАНИЯ")
         print("=" * 80)
         
-        total_scenarios = len(scenarios)
-        
+        # ✅ УНИВЕРСАЛЬНЫЙ ЦИКЛ для любого количества сценариев
         for idx, scenario in enumerate(scenarios, 1):
             scenario_user_id = f"{TEST_USER_ID_BASE}_{idx:02d}"
             
@@ -106,15 +110,18 @@ async def main():
             print_system_message(f"📝 Название: {scenario['scenario_name']}")
             print_system_message(f"👤 User ID: {scenario_user_id}")
             
-            # ✅ КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ: Очистка памяти перед каждым сценарием
-            if idx > 1:  # Для 2-го и последующих сценариев (1-й уже очищен глобально)
+            # ✅ ОЧИСТКА ПАМЯТИ между сценариями (кроме первого)
+            if idx > 1:  
                 print()  # Пустая строка для читаемости
                 await clear_server_memory(client, scenario['scenario_name'])
                 print()
             
-            # Выполняем шаги текущего сценария
-            for step_idx, step in enumerate(scenario['steps'], 1):
-                print(f"\n[{step_idx}/{len(scenario['steps'])}]")
+            # ✅ ВЫПОЛНЕНИЕ ШАГОВ сценария
+            steps = scenario.get('steps', [])
+            total_steps = len(steps)
+            
+            for step_idx, step in enumerate(steps, 1):
+                print(f"\n[{step_idx}/{total_steps}]")
                 print_user_message(step)
                 
                 result = await send_test_message(client, step, scenario_user_id)
@@ -124,19 +131,20 @@ async def main():
                 else:
                     print_error_message(f"Ошибка: {result['bot_response']}")
                 
-                # Задержка между запросами для соблюдения лимитов API
-                if step_idx < len(scenario['steps']):  # Не ждем после последнего шага в сценарии
-                    await asyncio.sleep(2)  # Короткая пауза между шагами внутри диалога
+                # ✅ ПАУЗА между шагами внутри диалога
+                if step_idx < total_steps:  
+                    await asyncio.sleep(1.5)  # Уменьшена с 2s до 1.5s для GPT-4o mini
             
             print_success_message(f"✅ ЗАВЕРШЕН ДИАЛОГ: {scenario['scenario_name']}")
             print("=" * 80)
             
-            # Пауза между диалогами (сценариями)
+            # ✅ ПАУЗА между диалогами (сценариями)
             if idx < total_scenarios:
                 print_system_message("💤 Пауза перед следующим диалогом...")
-                await asyncio.sleep(3)  # Пауза между диалогами
+                await asyncio.sleep(2)  # Уменьшена с 3s до 2s
 
 if __name__ == "__main__":
     asyncio.run(main())
     print_system_message("🏁 ВСЕ ДИАЛОГИ ЗАВЕРШЕНЫ - Тестирование окончено")
-    print_system_message("📊 Проверьте логи в терминале с app.py и в папке rag_debug_logs/")
+    print_system_message(f"📊 Проверьте логи в терминале с app.py и в папке rag_debug_logs/")
+    print_system_message(f"🎯 Архитектура: 2x GPT-4o mini (ChatEngine + Финальный ответ)")
