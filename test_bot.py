@@ -20,7 +20,6 @@ class colors:
     SUCCESS = '\033[96m'
     ENDC = '\033[0m'
 
-# ... (все функции print_* остаются без изменений) ...
 def print_user_message(message):
     print(f"{colors.USER}👤 [USER]: {message}{colors.ENDC}")
 
@@ -37,25 +36,24 @@ def print_success_message(message):
 def print_error_message(message):
     print(f"{colors.ERROR}❌ {message}{colors.ENDC}")
 
-
-# --- 🔥 НОВАЯ ФУНКЦИЯ ДЛЯ СБРОСА ПАМЯТИ 🔥 ---
-async def clear_server_memory(client):
-    """Отправляет запрос на /clear-memory для очистки состояния сервера."""
+async def clear_server_memory(client, scenario_name=""):
+    """✅ ИСПРАВЛЕНО: Очистка памяти сервера с указанием сценария"""
     clear_url = f"{APP_URL}/clear-memory"
-    print_system_message(f"🧹 Попытка сброса памяти сервера по адресу: {clear_url}")
+    context = f"для сценария '{scenario_name}'" if scenario_name else "глобальная очистка"
+    print_system_message(f"🧹 Сброс памяти сервера {context}")
+    
     try:
         response = await client.post(clear_url, timeout=10.0)
         if response.status_code == 200:
-            print_success_message("Память сервера успешно сброшена (команда отправлена).")
+            print_success_message(f"Память сервера сброшена {context}")
         else:
-            print_error_message(f"Не удалось сбросить память. Сервер ответил: {response.status_code}")
+            print_error_message(f"Не удалось сбросить память. Код: {response.status_code}")
     except httpx.RequestError as exc:
         print_error_message(f"Ошибка подключения при сбросе памяти: {exc}")
-        print_system_message("Продолжаем тестирование без сброса. Убедитесь, что сервер app.py запущен.")
-
+        print_system_message("Продолжаем тестирование без сброса.")
 
 async def send_test_message(client, message_text, user_id):
-    """Отправляет сообщение на специальный test endpoint."""
+    """Отправляет сообщение на специальный test endpoint"""
     test_endpoint_url = f"{APP_URL}/test-message"
     test_payload = {"message": message_text, "user_id": user_id}
 
@@ -78,9 +76,10 @@ async def send_test_message(client, message_text, user_id):
     except httpx.RequestError as exc:
         return {'success': False, 'bot_response': f"❌ Ошибка подключения: {exc}"}
 
-
 async def main():
-    """Главная функция для запуска тестирования."""
+    """✅ ИСПРАВЛЕНО: Главная функция с очисткой памяти перед каждым сценарием"""
+    
+    # Загружаем сценарии тестирования
     try:
         with open(SCENARIOS_FILE, 'r', encoding='utf-8') as f:
             scenarios = json.load(f)
@@ -90,19 +89,30 @@ async def main():
 
     print_system_message("🚀 ЗАПУСК ТЕСТИРОВАНИЯ UKIDO AI ASSISTANT (ЛОКАЛЬНЫЙ РЕЖИМ)")
     print_system_message(f"🎯 Target URL: {APP_URL}")
+    print_system_message(f"📁 Сценарии: {SCENARIOS_FILE}")
     print("=" * 80)
 
     async with httpx.AsyncClient() as client:
-        # --- 🔥 ВЫЗЫВАЕМ СБРОС ПАМЯТИ В НАЧАЛЕ 🔥 ---
-        await clear_server_memory(client)
+        # ✅ ИСПРАВЛЕНО: Глобальная очистка в начале тестирования
+        await clear_server_memory(client, "НАЧАЛО ТЕСТИРОВАНИЯ")
         print("=" * 80)
         
         total_scenarios = len(scenarios)
+        
         for idx, scenario in enumerate(scenarios, 1):
             scenario_user_id = f"{TEST_USER_ID_BASE}_{idx:02d}"
-            print_system_message(f"СЦЕНАРИЙ {idx}/{total_scenarios}: {scenario['scenario_name']}")
-            print_system_message(f"👤 User ID для этого сценария: {scenario_user_id}")
             
+            print_system_message(f"🎭 НОВЫЙ ДИАЛОГ: СЦЕНАРИЙ {idx}/{total_scenarios}")
+            print_system_message(f"📝 Название: {scenario['scenario_name']}")
+            print_system_message(f"👤 User ID: {scenario_user_id}")
+            
+            # ✅ КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ: Очистка памяти перед каждым сценарием
+            if idx > 1:  # Для 2-го и последующих сценариев (1-й уже очищен глобально)
+                print()  # Пустая строка для читаемости
+                await clear_server_memory(client, scenario['scenario_name'])
+                print()
+            
+            # Выполняем шаги текущего сценария
             for step_idx, step in enumerate(scenario['steps'], 1):
                 print(f"\n[{step_idx}/{len(scenario['steps'])}]")
                 print_user_message(step)
@@ -114,15 +124,19 @@ async def main():
                 else:
                     print_error_message(f"Ошибка: {result['bot_response']}")
                 
-                # Задержка, чтобы не превысить лимиты Gemini 1.5 Pro (2 запроса в минуту)
-                await asyncio.sleep(31) 
+                # Задержка между запросами для соблюдения лимитов API
+                if step_idx < len(scenario['steps']):  # Не ждем после последнего шага в сценарии
+                    await asyncio.sleep(2)  # Короткая пауза между шагами внутри диалога
             
-            print_system_message(f"✅ ЗАВЕРШЕН: {scenario['scenario_name']}")
+            print_success_message(f"✅ ЗАВЕРШЕН ДИАЛОГ: {scenario['scenario_name']}")
             print("=" * 80)
+            
+            # Пауза между диалогами (сценариями)
             if idx < total_scenarios:
-                await asyncio.sleep(2)
+                print_system_message("💤 Пауза перед следующим диалогом...")
+                await asyncio.sleep(3)  # Пауза между диалогами
 
 if __name__ == "__main__":
     asyncio.run(main())
-    print_system_message("🏁 Тестирование завершено")
-
+    print_system_message("🏁 ВСЕ ДИАЛОГИ ЗАВЕРШЕНЫ - Тестирование окончено")
+    print_system_message("📊 Проверьте логи в терминале с app.py и в папке rag_debug_logs/")

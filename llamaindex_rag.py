@@ -1,10 +1,10 @@
 # llamaindex_rag.py
 """
-Простая LlamaIndex RAG система с ChatEngine для умного обогащения контекста
+✅ ИСПРАВЛЕНО: LlamaIndex RAG система с поддержкой истории диалога
 """
 import logging
 import time
-from typing import Tuple, Dict, Any
+from typing import Tuple, Dict, Any, List
 
 import pinecone
 from llama_index.core import VectorStoreIndex, Settings
@@ -36,7 +36,7 @@ except ImportError:
 
 class LlamaIndexRAG:
     """
-    Простая RAG система с ChatEngine для обогащения контекста.
+    ✅ ИСПРАВЛЕНО: RAG система с ChatEngine и поддержкой истории диалога.
     Использует GPT-4o mini для понимания неполных вопросов.
     """
     
@@ -90,33 +90,54 @@ class LlamaIndexRAG:
             self.logger.error(f"❌ Ошибка инициализации: {e}")
             raise
 
-    def search_knowledge_base(self, query: str) -> Tuple[str, Dict[str, Any]]:
+    def _prepare_smart_history(self, conversation_history: List[str] = None) -> List[str]:
         """
-        Поиск в базе знаний с обогащением контекста
+        Умная подготовка истории диалога - максимум 4 сообщения
+        """
+        if not conversation_history or len(conversation_history) == 0:
+            return []  # Первое сообщение
+        
+        # Адаптивная история: максимум 4 сообщения (2 пары вопрос-ответ)
+        return conversation_history[-4:]
+
+    def search_knowledge_base(self, query: str, conversation_history: List[str] = None) -> Tuple[str, Dict[str, Any]]:
+        """
+        ✅ ИСПРАВЛЕНО: Поиск в базе знаний с поддержкой истории диалога
         """
         search_start = time.time()
         
-        # Debug логирование
-        rag_debug.log_enricher_input(query, [])
+        # Подготавливаем умную историю
+        smart_history = self._prepare_smart_history(conversation_history)
+        
+        # Debug логирование с РЕАЛЬНОЙ историей
+        rag_debug.log_enricher_input(query, smart_history)
         
         if not self.chat_engine:
             self.logger.error("ChatEngine не готов")
             return "Ошибка: система не готова", {}
 
         try:
-            self.logger.info(f"🔍 Поиск: '{query}'")
+            self.logger.info(f"🔍 Поиск: '{query}' | История: {len(smart_history)} сообщений")
             
-            # Логируем системный промпт
+            # Системный промпт
             system_prompt = "Ты помощник по поиску в базе знаний школы Ukido..."
-            rag_debug.log_enricher_prompt(f"SYSTEM: {system_prompt}\nUSER: {query}")
             
-            # ChatEngine обрабатывает запрос
+            # Обогащаем запрос историей если она есть
+            enriched_query = query
+            if smart_history:
+                history_context = "\n".join(smart_history[-2:])  # Последние 2 сообщения для контекста
+                enriched_query = f"Контекст диалога: {history_context}\n\nВопрос: {query}"
+            
+            # Логируем обогащенный промпт
+            rag_debug.log_enricher_prompt(f"SYSTEM: {system_prompt}\nENRICHED QUERY: {enriched_query}")
+            
+            # ChatEngine обрабатывает обогащенный запрос
             enrichment_start = time.time()
-            response = self.chat_engine.chat(query)
+            response = self.chat_engine.chat(enriched_query)
             enrichment_time = time.time() - enrichment_start
             
             # Debug логирование результата
-            rag_debug.log_enricher_output("ChatEngine обработал запрос", enrichment_time)
+            rag_debug.log_enricher_output(f"ChatEngine обработал запрос с историей ({len(smart_history)} msg)", enrichment_time)
             
             # Извлекаем чанки
             context_chunks = []
@@ -153,9 +174,10 @@ class LlamaIndexRAG:
                 'chunks_found': len(context_chunks),
                 'average_score': average_score,
                 'max_score': max(scores) if scores else 0.5,
+                'history_used': len(smart_history)  # Добавляем метрику использования истории
             }
 
-            self.logger.info(f"✅ Найдено {len(context_chunks)} чанков за {search_time:.2f}s")
+            self.logger.info(f"✅ Найдено {len(context_chunks)} чанков за {search_time:.2f}s (история: {len(smart_history)})")
             return context, metrics
 
         except Exception as e:
