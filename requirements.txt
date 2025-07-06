@@ -1,4 +1,4 @@
-# Основные зависимости проекта
+Основные зависимости проекта
 Flask
 python-dotenv
 google-generativeai
@@ -7,10 +7,11 @@ hubspot-api-client
 redis
 gunicorn
 
-# --- LlamaIndex и все необходимые плагины ---
+--- LlamaIndex и все необходимые плагины ---
 pinecone-client
 llama-index
 llama-index-embeddings-gemini
 llama-index-llms-openrouter
 llama-index-vector-stores-pinecone
-llama-index-postprocessor-sentence-transformers
+llama-index-postprocessor-sbert-rerank # <--- ВОТ ПРАВИЛЬНОЕ НАЗВАНИЕ
+sentence-transformers # <--- И ЭТА БИБЛИОТЕКА НУЖНА ДЛЯ ЕГО РАБОТЫ
