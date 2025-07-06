@@ -1,4 +1,4 @@
-# llamaindex_rag.py (ФИНАЛЬНАЯ ВЕРСИЯ с обработкой лимитов API)
+# llamaindex_rag.py (ФИНАЛЬНАЯ ВЕРСИЯ с исправлением бага "not defined")
 import logging
 import time
 from typing import Tuple, Dict, Any
@@ -22,6 +22,12 @@ except ImportError:
     import sys
     sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
     from config import config
+
+# --- 🔥 КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ: Функция определена ДО ее использования 🔥 ---
+def retry_if_exception_type(exception_type):
+    """Вспомогательная функция для декоратора @retry."""
+    return lambda e: isinstance(e, exception_type)
+# --------------------------------------------------------------------
 
 class LlamaIndexRAG:
     """
@@ -59,12 +65,11 @@ class LlamaIndexRAG:
             self.logger.error(f"❌ Ошибка при инициализации LlamaIndex RAG: {e}", exc_info=True)
             raise
 
-    # --- 🔥 КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: Декоратор для обработки лимитов 🔥 ---
     @retry(
-        wait=wait_exponential(multiplier=2, min=5, max=30), # Ждем 5с, потом 10с, потом 20с, макс 30с
-        stop=stop_after_attempt(4), # Делаем 4 попытки
+        wait=wait_exponential(multiplier=2, min=5, max=30),
+        stop=stop_after_attempt(4),
         retry_error_callback=lambda state: logging.warning(f"Достигнут лимит API Gemini. Попытка #{state.attempt_number}, ждем..."),
-        retry=retry_if_exception_type(ResourceExhausted) # Повторяем только при ошибке лимита
+        retry=retry_if_exception_type(ResourceExhausted)
     )
     def search_knowledge_base(self, query: str) -> Tuple[str, Dict[str, Any]]:
         """
@@ -77,7 +82,6 @@ class LlamaIndexRAG:
 
         try:
             self.logger.info(f"🔍 LlamaIndex RAG: Поиск по запросу: '{query}'")
-            # Этот вызов теперь защищен декоратором @retry
             response = self.query_engine.query(query)
 
             context_chunks = [node.get_content() for node in response.source_nodes]
@@ -98,16 +102,11 @@ class LlamaIndexRAG:
             return context, metrics
 
         except ResourceExhausted as e:
-            # Этот блок сработает, если все 4 попытки не увенчались успехом
             self.logger.error(f"❌ Не удалось выполнить запрос к Gemini после нескольких попыток: {e}")
             return "К сожалению, сервер AI сейчас перегружен. Пожалуйста, повторите ваш запрос через минуту.", {}
         except Exception as e:
             self.logger.error(f"❌ Ошибка во время поиска LlamaIndex RAG: {e}", exc_info=True)
             return f"К сожалению, произошла внутренняя ошибка при поиске информации.", {}
-
-# Вспомогательная функция для декоратора
-def retry_if_exception_type(exception_type):
-    return lambda e: isinstance(e, exception_type)
 
 try:
     llama_index_rag = LlamaIndexRAG()
