@@ -1,4 +1,7 @@
-# llamaindex_rag.py (ФИНАЛЬНАЯ ВЕРСИЯ с исправлением бага "not defined")
+# llamaindex_rag.py
+"""
+Простая LlamaIndex RAG система с ChatEngine для умного обогащения контекста
+"""
 import logging
 import time
 from typing import Tuple, Dict, Any
@@ -6,14 +9,22 @@ from typing import Tuple, Dict, Any
 import pinecone
 from llama_index.core import VectorStoreIndex, Settings
 from llama_index.vector_stores.pinecone import PineconeVectorStore
-from llama_index.llms.gemini import Gemini
+from llama_index.llms.openrouter import OpenRouter
 from llama_index.embeddings.gemini import GeminiEmbedding
+from llama_index.core.chat_engine import ContextChatEngine
 from llama_index.postprocessor.sbert_rerank import SentenceTransformerRerank
 
-# --- НОВЫЙ БЛОК: Импорты для обработки лимитов ---
-from tenacity import retry, stop_after_attempt, wait_exponential
-from google.api_core.exceptions import ResourceExhausted
-# -------------------------------------------------
+# Импорт debug логгера
+try:
+    from rag_debug_logger import rag_debug
+except ImportError:
+    # Fallback если debug логгер недоступен
+    class DummyDebug:
+        def log_enricher_input(self, *args): pass
+        def log_enricher_prompt(self, *args): pass
+        def log_enricher_output(self, *args): pass
+        def log_retrieval_results(self, *args): pass
+    rag_debug = DummyDebug()
 
 try:
     from config import config
@@ -23,26 +34,27 @@ except ImportError:
     sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
     from config import config
 
-# --- 🔥 КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ: Функция определена ДО ее использования 🔥 ---
-def retry_if_exception_type(exception_type):
-    """Вспомогательная функция для декоратора @retry."""
-    return lambda e: isinstance(e, exception_type)
-# --------------------------------------------------------------------
-
 class LlamaIndexRAG:
     """
-    Отказоустойчивый класс для работы с RAG системой, который умеет
-    обрабатывать лимиты API Gemini.
+    Простая RAG система с ChatEngine для обогащения контекста.
+    Использует GPT-4o mini для понимания неполных вопросов.
     """
+    
     def __init__(self):
         self.logger = logging.getLogger(__name__)
         self.pinecone_index_name = "ukido"
-        self.query_engine = None
+        self.chat_engine = None
 
         try:
             # Настройка моделей
-            Settings.embed_model = GeminiEmbedding(model_name=config.EMBEDDING_MODEL, api_key=config.GEMINI_API_KEY)
-            Settings.llm = Gemini(model_name="models/gemini-1.5-pro-latest", api_key=config.GEMINI_API_KEY)
+            Settings.embed_model = GeminiEmbedding(
+                model_name=config.EMBEDDING_MODEL, 
+                api_key=config.GEMINI_API_KEY
+            )
+            Settings.llm = OpenRouter(
+                api_key=config.OPENROUTER_API_KEY, 
+                model="openai/gpt-4o-mini"
+            )
 
             # Подключение к Pinecone
             pc = pinecone.Pinecone(api_key=config.PINECONE_API_KEY)
@@ -51,65 +63,108 @@ class LlamaIndexRAG:
             index = VectorStoreIndex.from_vector_store(vector_store=vector_store)
 
             # Настройка реранкера
-            reranker = SentenceTransformerRerank(model="cross-encoder/ms-marco-MiniLM-L-2-v2", top_n=4)
-
-            # Создание Query Engine
-            self.query_engine = index.as_query_engine(
-                similarity_top_k=15,
-                node_postprocessors=[reranker]
+            reranker = SentenceTransformerRerank(
+                model="cross-encoder/ms-marco-MiniLM-L-2-v2", 
+                top_n=4
             )
 
-            self.logger.info("✅ LlamaIndex RAG система с реранкером успешно инициализирована (модель: Gemini 1.5 Pro)")
+            # Создание ChatEngine
+            self.chat_engine = ContextChatEngine.from_defaults(
+                retriever=index.as_retriever(
+                    similarity_top_k=15,
+                    node_postprocessors=[reranker]
+                ),
+                llm=Settings.llm,
+                system_prompt="""Ты помощник по поиску в базе знаний школы Ukido. 
+
+Если спрашивают "Сколько стоит?" - ищи информацию про стоимость курсов.
+Если спрашивают "Что нужно?" - добавь контекст о чем речь.
+Если спрашивают "Когда?" - уточни про расписание.
+
+Возвращай только найденную информацию, не добавляй от себя."""
+            )
+
+            self.logger.info("✅ LlamaIndex ChatEngine инициализирован")
 
         except Exception as e:
-            self.logger.error(f"❌ Ошибка при инициализации LlamaIndex RAG: {e}", exc_info=True)
+            self.logger.error(f"❌ Ошибка инициализации: {e}")
             raise
 
-    @retry(
-        wait=wait_exponential(multiplier=2, min=5, max=30),
-        stop=stop_after_attempt(4),
-        retry_error_callback=lambda state: logging.warning(f"Достигнут лимит API Gemini. Попытка #{state.attempt_number}, ждем..."),
-        retry=retry_if_exception_type(ResourceExhausted)
-    )
     def search_knowledge_base(self, query: str) -> Tuple[str, Dict[str, Any]]:
         """
-        Поиск в базе знаний с автоматической обработкой лимитов API.
+        Поиск в базе знаний с обогащением контекста
         """
         search_start = time.time()
-        if not self.query_engine:
-            self.logger.error("LlamaIndex query engine не инициализирован.")
-            return "Ошибка: LlamaIndex RAG не готов к работе.", {}
+        
+        # Debug логирование
+        rag_debug.log_enricher_input(query, [])
+        
+        if not self.chat_engine:
+            self.logger.error("ChatEngine не готов")
+            return "Ошибка: система не готова", {}
 
         try:
-            self.logger.info(f"🔍 LlamaIndex RAG: Поиск по запросу: '{query}'")
-            response = self.query_engine.query(query)
-
-            context_chunks = [node.get_content() for node in response.source_nodes]
-            context = "\n\n".join(context_chunks)
-
+            self.logger.info(f"🔍 Поиск: '{query}'")
+            
+            # Логируем системный промпт
+            system_prompt = "Ты помощник по поиску в базе знаний школы Ukido..."
+            rag_debug.log_enricher_prompt(f"SYSTEM: {system_prompt}\nUSER: {query}")
+            
+            # ChatEngine обрабатывает запрос
+            enrichment_start = time.time()
+            response = self.chat_engine.chat(query)
+            enrichment_time = time.time() - enrichment_start
+            
+            # Debug логирование результата
+            rag_debug.log_enricher_output("ChatEngine обработал запрос", enrichment_time)
+            
+            # Извлекаем чанки
+            context_chunks = []
+            scores = []
+            
+            if hasattr(response, 'source_nodes') and response.source_nodes:
+                context_chunks = [node.get_content() for node in response.source_nodes]
+                scores = [getattr(node, 'score', 0.5) for node in response.source_nodes]
+            
+            # Fallback если чанки не найдены
+            if not context_chunks and hasattr(response, 'response'):
+                context_chunks = [str(response.response)]
+                scores = [0.7]
+            
+            context = "\n\n".join(context_chunks) if context_chunks else "Информация не найдена"
             search_time = time.time() - search_start
-            scores = [node.get_score() for node in response.source_nodes]
-            average_score = sum(scores) / len(scores) if scores else 0.0
+            
+            # Дополняем scores до нужного количества
+            while len(scores) < len(context_chunks):
+                scores.append(0.5)
+            
+            # Debug логирование результатов поиска
+            rag_debug.log_retrieval_results(
+                chunks=context_chunks,
+                scores=scores[:len(context_chunks)],
+                time_taken=search_time,
+                total_before_rerank=15
+            )
 
+            # Метрики
+            average_score = sum(scores) / len(scores) if scores else 0.5
             metrics = {
                 'search_time': search_time,
                 'chunks_found': len(context_chunks),
                 'average_score': average_score,
-                'max_score': max(scores) if scores else 0.0,
+                'max_score': max(scores) if scores else 0.5,
             }
 
-            self.logger.info(f"✅ LlamaIndex RAG: Найдено {metrics['chunks_found']} чанков за {search_time:.2f}с")
+            self.logger.info(f"✅ Найдено {len(context_chunks)} чанков за {search_time:.2f}s")
             return context, metrics
 
-        except ResourceExhausted as e:
-            self.logger.error(f"❌ Не удалось выполнить запрос к Gemini после нескольких попыток: {e}")
-            return "К сожалению, сервер AI сейчас перегружен. Пожалуйста, повторите ваш запрос через минуту.", {}
         except Exception as e:
-            self.logger.error(f"❌ Ошибка во время поиска LlamaIndex RAG: {e}", exc_info=True)
-            return f"К сожалению, произошла внутренняя ошибка при поиске информации.", {}
+            self.logger.error(f"❌ Ошибка поиска: {e}")
+            return "Ошибка при поиске информации", {}
 
+# Глобальная инициализация
 try:
     llama_index_rag = LlamaIndexRAG()
 except Exception as e:
     llama_index_rag = None
-    logging.getLogger(__name__).critical(f"Не удалось создать LlamaIndexRAG: {e}")
+    logging.getLogger(__name__).error(f"Не удалось создать LlamaIndexRAG: {e}")
