@@ -1,4 +1,4 @@
-# app.py (CRITICAL FIXES - Production Ready)
+# app.py (NEW GO!)
 """
 🚨 КРИТИЧЕСКИЕ ИСПРАВЛЕНИЯ:
 1. УБРАНО дублирование классов ZhvanetskyHumorLevelSystem и ProductionFastResponseCache
@@ -25,6 +25,11 @@ from conversation import conversation_manager
 from rag_system import rag_system
 from hubspot_client import hubspot_client
 from intelligent_analyzer import intelligent_analyzer
+
+# --- НОВЫЙ БЛОК: ИМПОРТ И НАСТРОЙКА LLAMAINDEX ---
+from llamaindex_rag import llama_index_rag # Импортируем новый модуль
+USE_LLAMAINDEX = True # 🚩 ГЛАВНЫЙ ПЕРЕКЛЮЧАТЕЛЬ
+# --- КОНЕЦ НОВОГО БЛОКА ---
 
 
 class ProductionConnectionPool:
@@ -549,13 +554,22 @@ class ProductionAIService:
             # Parallel processing для независимых операций
             def get_conversation_history():
                 return conversation_manager.get_conversation_history(chat_id)
+            
             def get_rag_context():
-                # Получаем историю для обогащения запроса
                 history = conversation_manager.get_conversation_history(chat_id)
-                # Обогащаем запрос контекстом диалога
                 enriched_query = intelligent_analyzer.enrich_query_with_context(user_message, history)
-                context, metrics = rag_system.search_knowledge_base(enriched_query)
+
+                # --- ЗАМЕНЕНО НА ЭТОТ БЛОК ---
+                if USE_LLAMAINDEX and llama_index_rag:
+                    self.logger.info("🚀 Используется LlamaIndex RAG")
+                    context, metrics = llama_index_rag.search_knowledge_base(enriched_query)
+                else:
+                    self.logger.info("Legacy RAG в действии")
+                    context, metrics = rag_system.search_knowledge_base(enriched_query)
+                # --- КОНЕЦ БЛОКА НА ЗАМЕНУ ---
+
                 return context, metrics
+
             # Запускаем параллельно
             try:
                 history_future = self.executor.submit(get_conversation_history)
