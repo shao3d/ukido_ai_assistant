@@ -1,8 +1,6 @@
 # llamaindex_rag.py
 """
-✅ ФИНАЛЬНАЯ ВЕРСИЯ v3: RAG-система с поддержкой Машины Состояний.
-- Принимает 'current_state' и динамически формирует системный промпт.
-- Инструктирует модель генерировать токен [ACTION:SEND_LESSON_LINK] в состоянии 'closing'.
+✅ ФИНАЛЬНАЯ ВЕРСИЯ v6: Исправлен недостающий импорт 'ChatMessage'.
 """
 import logging
 import time
@@ -15,6 +13,7 @@ from llama_index.llms.openrouter import OpenRouter
 from llama_index.embeddings.gemini import GeminiEmbedding
 from llama_index.core.chat_engine import ContextChatEngine
 from llama_index.postprocessor.sbert_rerank import SentenceTransformerRerank
+# ✅ КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ: Добавляем недостающие импорты
 from llama_index.core.llms import ChatMessage, MessageRole
 from llama_index.core.memory import ChatMemoryBuffer
 
@@ -22,10 +21,9 @@ try:
     from rag_debug_logger import rag_debug
 except ImportError:
     class DummyDebug:
-        def log_enricher_input(self, *args): pass
         def log_enricher_prompt(self, *args): pass
-        def log_enricher_output(self, *args): pass
         def log_retrieval_results(self, *args): pass
+        def log_final_response(self, *args, **kwargs): pass
     rag_debug = DummyDebug()
 
 try:
@@ -37,81 +35,77 @@ except ImportError:
 
 class LlamaIndexRAG:
     """
-    ✅ ФИНАЛЬНАЯ ВЕРСИЯ v3: RAG система с поддержкой состояний диалога.
+    ✅ ФИНАЛЬНАЯ ВЕРСИЯ v6: RAG-система с динамическим созданием движка и юмором.
     """
-    
     def __init__(self):
         self.logger = logging.getLogger(__name__)
         self.pinecone_index_name = "ukido"
-        self.chat_engine = None
-
+        
+        self.index = None
+        self.reranker = None
+        self.llm = None
+        
         try:
-            Settings.embed_model = GeminiEmbedding(
-                model_name=config.EMBEDDING_MODEL, 
-                api_key=config.GEMINI_API_KEY
-            )
-            Settings.llm = OpenRouter(
+            self.llm = OpenRouter(
                 api_key=config.OPENROUTER_API_KEY, 
                 model="openai/gpt-4o-mini",
                 temperature=0.7,
                 max_tokens=1024
             )
+            Settings.llm = self.llm
+            Settings.embed_model = GeminiEmbedding(
+                model_name=config.EMBEDDING_MODEL, 
+                api_key=config.GEMINI_API_KEY
+            )
 
             pc = pinecone.Pinecone(api_key=config.PINECONE_API_KEY)
             pinecone_index = pc.Index(self.pinecone_index_name)
             vector_store = PineconeVectorStore(pinecone_index=pinecone_index)
-            index = VectorStoreIndex.from_vector_store(vector_store=vector_store)
+            self.index = VectorStoreIndex.from_vector_store(vector_store=vector_store)
 
-            reranker = SentenceTransformerRerank(
+            self.reranker = SentenceTransformerRerank(
                 model="cross-encoder/ms-marco-MiniLM-L-2-v2", 
                 top_n=4
             )
-            
-            memory = ChatMemoryBuffer.from_defaults(token_limit=16384)
 
-            # ВАЖНО: Мы создаем движок с базовым промптом. Он будет обновляться динамически.
-            self.chat_engine = ContextChatEngine.from_defaults(
-                retriever=index.as_retriever(
-                    similarity_top_k=15,
-                    node_postprocessors=[reranker]
-                ),
-                llm=Settings.llm,
-                memory=memory,
-            )
-
-            self.logger.info("✅ LlamaIndex ChatEngine (v3, с поддержкой состояний) инициализирован")
+            self.logger.info("✅ Компоненты LlamaIndexRAG (v6) успешно инициализированы.")
 
         except Exception as e:
-            self.logger.error(f"❌ Ошибка инициализации LlamaIndexRAG: {e}", exc_info=True)
+            self.logger.error(f"❌ Критическая ошибка инициализации компонентов LlamaIndexRAG: {e}", exc_info=True)
             raise
 
-    def _build_dynamic_system_prompt(self, current_state: str) -> str:
-        """Собирает системный промпт на основе текущего состояния диалога."""
-        
+    def _build_dynamic_system_prompt(self, current_state: str, use_humor: bool) -> str:
         base_prompt = """Ты — AI-ассистент онлайн-школы Ukido.
 Твоя задача — отвечать на вопросы, используя предоставленный ниже контекст из базы знаний.
-- Будь кратким и отвечай по существу.
 - НЕ выдумывай факты.
 - Если в контексте нет ответа на вопрос, честно скажи: "К сожалению, в моей базе знаний нет информации по этому вопросу."
 """
-
+        verbosity_instruction = "Отвечай полно и дружелюбно, но по существу." if use_humor else "Будь кратким и отвечай по существу."
+        
         state_instructions = {
             'greeting': "Это начало диалога. Начни с короткого дружелюбного приветствия.",
             'fact_finding': "Сосредоточься на предоставлении точных фактов из контекста. Будь кратким и четким.",
             'problem_solving': "Прояви эмпатию к проблеме пользователя. Используй найденные факты, чтобы предложить решение или совет.",
-            'closing': 'ВАЖНО: Пользователь выражает желание записаться на урок. Твоя главная цель — помочь ему и подтвердить запись. В конце ответа обязательно добавь специальный токен [ACTION:SEND_LESSON_LINK].'
+            'closing': """ПРИОРИТЕТНАЯ ЗАДАЧА: Пользователь хочет записаться на урок. Твоя единственная цель — сгенерировать токен [ACTION:SEND_LESSON_LINK]. Не отвечай на другие части вопроса. Просто подтверди его намерение короткой фразой (например, "Отлично, с удовольствием помогу!") и сразу же добавь токен."""
         }
         
-        instruction = state_instructions.get(current_state, state_instructions['fact_finding'])
+        humor_instruction = """
+ИНСТРУКЦИЯ ПО СТИЛЮ: Твой стиль общения — легкий, интеллигентный юмор в духе Михаила Жванецкого. Используй меткие наблюдения, иронию и афористичные фразы. Твоя шутка не должна заслонять суть ответа, а элегантно обрамлять ее.
+"""
         
-        return f"{base_prompt}\nИНСТРУКЦИЯ ПО СИТУАЦИИ: {instruction}"
-
+        instruction = state_instructions.get(current_state, state_instructions['fact_finding'])
+        final_prompt = f"{base_prompt}\n{verbosity_instruction}\nИНСТРУКЦИЯ ПО СИТУАЦИИ: {instruction}"
+        
+        if use_humor:
+            final_prompt += humor_instruction
+            
+        return final_prompt
 
     def _prepare_chat_history(self, conversation_history: List[str] = None) -> List[ChatMessage]:
         if not conversation_history: return []
         smart_history = conversation_history[-4:]
         chat_messages = []
-        for i, msg in enumerate(smart_history):
+        for msg in smart_history:
             try:
                 role_str, content = msg.split(': ', 1)
                 role = MessageRole.ASSISTANT if "ассистент" in role_str.lower() else MessageRole.USER
@@ -121,30 +115,29 @@ class LlamaIndexRAG:
                 continue
         return chat_messages
 
-    def search_and_answer(self, query: str, conversation_history: List[str] = None, current_state: str = 'fact_finding') -> Tuple[str, Dict[str, Any]]:
-        """
-        ✅ ГЛАВНЫЙ МЕТОД v3: Принимает состояние и динамически управляет поведением модели.
-        """
+    def search_and_answer(self, query: str, conversation_history: List[str] = None, current_state: str = 'fact_finding', use_humor: bool = False) -> Tuple[str, Dict[str, Any]]:
         search_start = time.time()
         
-        if not self.chat_engine:
-            self.logger.error("ChatEngine не готов")
+        if not all([self.index, self.reranker, self.llm]):
+            self.logger.error("Компоненты RAG не готовы")
             return "Ошибка: RAG-система не готова.", {}
 
         try:
-            # 1. Собираем динамический промпт на основе состояния
-            system_prompt = self._build_dynamic_system_prompt(current_state)
-            
-            # 2. Обновляем промпт в движке ПЕРЕД вызовом
-            self.chat_engine.update_prompts({"system_prompt": system_prompt})
-            
+            system_prompt = self._build_dynamic_system_prompt(current_state, use_humor)
+            rag_debug.log_enricher_prompt(f"DYNAMIC SYSTEM PROMPT (Humor: {use_humor}):\n{system_prompt}")
+
+            chat_engine = ContextChatEngine.from_defaults(
+                retriever=self.index.as_retriever(similarity_top_k=15, node_postprocessors=[self.reranker]),
+                llm=self.llm,
+                system_prompt=system_prompt,
+                memory=ChatMemoryBuffer.from_defaults(token_limit=16384)
+            )
+
             chat_history = self._prepare_chat_history(conversation_history)
             history_len = len(chat_history)
-            
             self.logger.info(f"🔍 Запрос в LlamaIndex: '{query}' | Состояние: {current_state} | История: {history_len}")
-            rag_debug.log_enricher_prompt(f"DYNAMIC SYSTEM PROMPT:\n{system_prompt}")
             
-            response = self.chat_engine.chat(query, chat_history=chat_history)
+            response = chat_engine.chat(query, chat_history=chat_history)
             
             final_answer = response.response
             search_time = time.time() - search_start
@@ -165,8 +158,6 @@ class LlamaIndexRAG:
             self.logger.error(f"❌ Ошибка в RAG search_and_answer: {e}", exc_info=True)
             return "К сожалению, произошла внутренняя ошибка при поиске информации.", {}
 
-
-# Глобальная инициализация
 try:
     llama_index_rag = LlamaIndexRAG()
 except Exception as e:
