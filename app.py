@@ -1,6 +1,6 @@
 # app.py
 """
-✅ ФИНАЛЬНАЯ ВЕРСИЯ v13: Улучшен контроль юмора.
+✅ ВЕРСИЯ v15: Исправлена и улучшена очистка ответов от клише с помощью Regex.
 """
 import logging
 import time
@@ -128,7 +128,7 @@ class ProductionAIService:
         self.executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="UkidoAI")
         if not llama_index_rag: raise RuntimeError("LlamaIndex RAG failed to initialize")
         self.analyzer_llm = llama_index_rag.llm
-        self.logger.info("🚀 ProductionAIService (v13) готов")
+        self.logger.info("🚀 ProductionAIService (v15) готов")
 
     def _should_use_humor(self, user_message: str, history: List[str]) -> bool:
         message_lower = user_message.lower()
@@ -209,10 +209,36 @@ class ProductionAIService:
         if DEBUG_LOGGING_ENABLED: rag_debug.log_final_response(final_response, rag_metrics.get('search_time', 0))
         return final_response
 
+    def _clean_response_patterns(self, response: str) -> str:
+        """Убираем назойливые паттерны из ответов с помощью regex"""
+        if not response:
+            return response
+
+        # Regex паттерн для поиска слов-паразитов в начале строки (с учетом пробелов и опциональной запятой)
+        # ^\s* - любые пробелы в начале
+        # (Ах|Ох|Эх|Увы|О|Ну|Что\s+ж|Итак|Ладно|Хорошо) - наши слова
+        # ,?\s* - опциональная запятая и пробелы после
+        pattern = re.compile(r'^\s*(Ах|Ох|Эх|Увы|О|Ну|Что\s+ж|Итак|Ладно|Хорошо),?\s*', re.IGNORECASE)
+        
+        # Заменяем найденный паттерн на пустую строку
+        cleaned = pattern.sub('', response)
+        
+        # Финальная обработка: убираем лишние пробелы и делаем первую букву заглавной
+        cleaned = cleaned.strip()
+        if cleaned and cleaned[0].islower():
+            cleaned = cleaned[0].upper() + cleaned[1:]
+            
+        return cleaned
+
     def _process_action_tokens(self, response: str, chat_id: str) -> str:
+        # НОВОЕ: Сначала чистим от назойливых паттернов
+        response = self._clean_response_patterns(response)
+        
+        # Существующая логика
         if "[ACTION:SEND_LESSON_LINK]" in response:
             lesson_link = config.get_lesson_url(user_id=chat_id)
-            response = response.replace("[ACTION:SEND_LESSON_LINK]", f"\n\nОтлично! Вот ссылка для записи на бесплатный пробный урок:\n🔗 {lesson_link}").strip()
+            response = response.replace("[ACTION:SEND_LESSON_LINK]", 
+                                        f"\n\nОтлично! Вот ссылка для записи на бесплатный пробный урок:\n🔗 {lesson_link}").strip()
         return response
 
 production_ai_service = ProductionAIService()
@@ -221,7 +247,7 @@ app = Flask(__name__)
 @app.route('/', methods=['POST', 'GET'])
 def handle_telegram_webhook():
     if request.method == 'GET':
-        return "Ukido AI Assistant (v13) is running! 🚀", 200
+        return "Ukido AI Assistant (v15) is running! 🚀", 200
     try:
         update = request.get_json()
         if 'message' in update and 'text' in update['message']:
