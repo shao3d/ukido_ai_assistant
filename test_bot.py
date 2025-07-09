@@ -77,6 +77,19 @@ async def send_test_message(client, message_text, user_id):
     except httpx.RequestError as exc:
         return {'success': False, 'bot_response': f"❌ Ошибка подключения: {exc}"}
 
+async def save_log_file(client, filename):
+    """Отправляет запрос на сервер для сохранения файла лога."""
+    save_url = f"{APP_URL}/save-log"
+    print_system_message(f"💾 Запрос на сохранение лога в файл: {filename}")
+    try:
+        response = await client.post(save_url, json={"filename": filename}, timeout=10.0)
+        if response.status_code == 200:
+            print_success_message(f"Сервер подтвердил сохранение лога: {response.json().get('message')}")
+        else:
+            print_error_message(f"Не удалось сохранить лог. Код: {response.status_code}")
+    except httpx.RequestError as exc:
+        print_error_message(f"Ошибка подключения при сохранении лога: {exc}")
+
 async def main():
     """✅ УНИВЕРСАЛЬНАЯ ФУНКЦИЯ: Автоматически адаптируется к любому количеству сценариев"""
     
@@ -88,10 +101,14 @@ async def main():
         print_error_message(f"Файл сценариев '{SCENARIOS_FILE}' не найден.")
         return
     
+    # ✅ Генерируем уникальное имя файла для этого запуска
+    log_filename = f"test_run_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+
     # ✅ АВТОМАТИЧЕСКОЕ ОПРЕДЕЛЕНИЕ КОЛИЧЕСТВА СЦЕНАРИЕВ
     total_scenarios = len(scenarios)
     
     print_system_message("🚀 ЗАПУСК ТЕСТИРОВАНИЯ UKIDO AI ASSISTANT (ЛОКАЛЬНЫЙ РЕЖИМ)")
+    print_system_message(f"📝 Лог этого запуска будет сохранен в: {log_filename}")
     print_system_message(f"🎯 Target URL: {APP_URL}")
     print_system_message(f"📁 Сценарии: {SCENARIOS_FILE}")
     print_system_message(f"📊 Обнаружено сценариев: {total_scenarios}")
@@ -142,9 +159,11 @@ async def main():
             if idx < total_scenarios:
                 print_system_message("💤 Пауза перед следующим диалогом...")
                 await asyncio.sleep(2)  # Уменьшена с 3s до 2s
+        
+        # ✅ В САМОМ КОНЦЕ main(), после цикла
+        await save_log_file(client, log_filename)
 
 if __name__ == "__main__":
     asyncio.run(main())
     print_system_message("🏁 ВСЕ ДИАЛОГИ ЗАВЕРШЕНЫ - Тестирование окончено")
-    print_system_message(f"📊 Проверьте логи в терминале с app.py и в папке rag_debug_logs/")
-    print_system_message(f"🎯 Архитектура: 2x GPT-4o mini (ChatEngine + Финальный ответ)")
+    print_system_message(f"📊 Проверьте лог в папке rag_debug_logs/")

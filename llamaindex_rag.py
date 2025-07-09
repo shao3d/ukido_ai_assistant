@@ -1,6 +1,6 @@
 # llamaindex_rag.py
 """
-✅ ФИНАЛЬНАЯ ВЕРСИЯ v6: Исправлен недостающий импорт 'ChatMessage'.
+✅ ФИНАЛЬНАЯ ВЕРСИЯ v11: Ультимативная инструкция для состояния 'closing'.
 """
 import logging
 import time
@@ -13,7 +13,6 @@ from llama_index.llms.openrouter import OpenRouter
 from llama_index.embeddings.gemini import GeminiEmbedding
 from llama_index.core.chat_engine import ContextChatEngine
 from llama_index.postprocessor.sbert_rerank import SentenceTransformerRerank
-# ✅ КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ: Добавляем недостающие импорты
 from llama_index.core.llms import ChatMessage, MessageRole
 from llama_index.core.memory import ChatMemoryBuffer
 
@@ -35,7 +34,7 @@ except ImportError:
 
 class LlamaIndexRAG:
     """
-    ✅ ФИНАЛЬНАЯ ВЕРСИЯ v6: RAG-система с динамическим созданием движка и юмором.
+    ✅ ФИНАЛЬНАЯ ВЕРСИЯ v11: RAG-система с ультимативным closing промптом.
     """
     def __init__(self):
         self.logger = logging.getLogger(__name__)
@@ -68,7 +67,7 @@ class LlamaIndexRAG:
                 top_n=4
             )
 
-            self.logger.info("✅ Компоненты LlamaIndexRAG (v6) успешно инициализированы.")
+            self.logger.info("✅ Компоненты LlamaIndexRAG (v11) успешно инициализированы.")
 
         except Exception as e:
             self.logger.error(f"❌ Критическая ошибка инициализации компонентов LlamaIndexRAG: {e}", exc_info=True)
@@ -86,7 +85,11 @@ class LlamaIndexRAG:
             'greeting': "Это начало диалога. Начни с короткого дружелюбного приветствия.",
             'fact_finding': "Сосредоточься на предоставлении точных фактов из контекста. Будь кратким и четким.",
             'problem_solving': "Прояви эмпатию к проблеме пользователя. Используй найденные факты, чтобы предложить решение или совет.",
-            'closing': """ПРИОРИТЕТНАЯ ЗАДАЧА: Пользователь хочет записаться на урок. Твоя единственная цель — сгенерировать токен [ACTION:SEND_LESSON_LINK]. Не отвечай на другие части вопроса. Просто подтверди его намерение короткой фразой (например, "Отлично, с удовольствием помогу!") и сразу же добавь токен."""
+            # ✅ ФИНАЛЬНАЯ ИНСТРУКЦИЯ: Максимально директивная и независимая от контекста.
+            'closing': """ПРИОРИТЕТНАЯ ЗАДАЧА: Пользователь хочет записаться на урок. Твоя единственная цель — сгенерировать токен [ACTION:SEND_LESSON_LINK].
+- Не отвечай на другие части вопроса, даже если они есть.
+- Игнорируй найденный контекст, если он не помогает с записью.
+- Твой ответ должен состоять ТОЛЬКО из короткой подтверждающей фразы (например, "Отлично, с удовольствием помогу!") и сразу после нее токена [ACTION:SEND_LESSON_LINK]."""
         }
         
         humor_instruction = """
@@ -100,18 +103,22 @@ class LlamaIndexRAG:
             final_prompt += humor_instruction
             
         return final_prompt
-
+    
     def _prepare_chat_history(self, conversation_history: List[str] = None) -> List[ChatMessage]:
+        """
+        Принимает список строк и конвертирует в ChatMessage.
+        """
         if not conversation_history: return []
+        
         smart_history = conversation_history[-4:]
         chat_messages = []
-        for msg in smart_history:
+        for msg_str in smart_history:
             try:
-                role_str, content = msg.split(': ', 1)
+                role_str, content = msg_str.split(': ', 1)
                 role = MessageRole.ASSISTANT if "ассистент" in role_str.lower() else MessageRole.USER
                 chat_messages.append(ChatMessage(role=role, content=content))
             except ValueError:
-                self.logger.warning(f"Некорректный формат сообщения в истории: '{msg}'")
+                self.logger.warning(f"Некорректный формат сообщения в истории, пропускаем: '{msg_str}'")
                 continue
         return chat_messages
 
@@ -126,18 +133,19 @@ class LlamaIndexRAG:
             system_prompt = self._build_dynamic_system_prompt(current_state, use_humor)
             rag_debug.log_enricher_prompt(f"DYNAMIC SYSTEM PROMPT (Humor: {use_humor}):\n{system_prompt}")
 
+            chat_history_messages = self._prepare_chat_history(conversation_history)
+            
             chat_engine = ContextChatEngine.from_defaults(
                 retriever=self.index.as_retriever(similarity_top_k=15, node_postprocessors=[self.reranker]),
                 llm=self.llm,
                 system_prompt=system_prompt,
-                memory=ChatMemoryBuffer.from_defaults(token_limit=16384)
+                memory=ChatMemoryBuffer.from_defaults(token_limit=16384, chat_history=chat_history_messages)
             )
 
-            chat_history = self._prepare_chat_history(conversation_history)
-            history_len = len(chat_history)
+            history_len = len(chat_history_messages)
             self.logger.info(f"🔍 Запрос в LlamaIndex: '{query}' | Состояние: {current_state} | История: {history_len}")
             
-            response = chat_engine.chat(query, chat_history=chat_history)
+            response = chat_engine.chat(query)
             
             final_answer = response.response
             search_time = time.time() - search_start

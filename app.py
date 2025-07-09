@@ -1,6 +1,6 @@
 # app.py
 """
-✅ ФИНАЛЬНАЯ ВЕРСИЯ v7: ВСЕ ЭНДПОИНТЫ НА МЕСТЕ.
+✅ ФИНАЛЬНАЯ ВЕРСИЯ v12: Улучшен FastResponseCache (порог 3 слова).
 """
 import logging
 import time
@@ -17,6 +17,8 @@ from config import config
 from telegram_bot import telegram_bot
 from conversation import conversation_manager
 from llamaindex_rag import llama_index_rag
+
+from llama_index.core.llms import ChatMessage, MessageRole
 
 try:
     from rag_debug_logger import rag_debug
@@ -36,7 +38,8 @@ class ProductionConnectionPool:
         self.session = requests.Session()
         self.logger = logging.getLogger(f"{__name__}.ConnectionPool")
         adapter = requests.adapters.HTTPAdapter(pool_connections=10, pool_maxsize=20, max_retries=3)
-        self.session.mount('http://', adapter); self.session.mount('https://', adapter)
+        self.session.mount('http://', adapter)
+        self.session.mount('https://', adapter)
         atexit.register(self.cleanup)
         self.logger.info("🔗 Production connection pool готов")
     def post(self, *args, **kwargs): return self.session.post(*args, **kwargs)
@@ -44,21 +47,34 @@ class ProductionConnectionPool:
     def cleanup(self): self.session.close(); self.logger.info("🔗 Connection pool закрыт")
 
 class ProductionFastResponseCache:
+    """✅ УЛУЧШЕНО: Кэш срабатывает только на короткие сообщения."""
     def __init__(self):
         self.fast_responses = {
             'цена': "Стоимость курсов от 6000 до 8000 грн в месяц. Первый урок бесплатный!",
             'стоимость': "Стоимость курсов от 6000 до 8000 грн в месяц. Первый урок бесплатный!",
             'сколько стоит': "Стоимость курсов от 6000 до 8000 грн в месяц. Первый урок бесплатный!",
-            'пробный': "Отлично! Первый урок у нас бесплатный.", 'урок': "У нас есть курсы soft-skills для детей 7-17 лет. Первый урок бесплатный!",
+            'пробный': "Отлично! Первый урок у нас бесплатный.",
+            'урок': "У нас есть курсы soft-skills для детей 7-17 лет. Первый урок бесплатный!",
             'возраст': "Курсы для детей 7-17 лет, группы: 7-9, 10-12, 13-17 лет.",
-            'время': "Расписание гибкое, подстраиваемся под удобное время.", 'записаться': "Замечательно! Давайте запишем на бесплатный пробный урок.",
+            'время': "Расписание гибкое, подстраиваемся под удобное время.",
+            'записаться': "Замечательно! Давайте запишем на бесплатный пробный урок."
         }
-        self.logger = logging.getLogger(f"{__name__}.FastCache"); self.logger.info("💨 Fast response cache готов")
+        self.logger = logging.getLogger(f"{__name__}.FastCache")
+        self.logger.info("💨 Умный fast response cache (v2) готов")
+
     def get_fast_response(self, message: str, chat_id: str) -> Optional[str]:
         message_lower = message.lower().strip()
+        
+        # ✅ ФИНАЛЬНОЕ ИСПРАВЛЕНИЕ: Пропускаем длинные сообщения мимо кэша.
+        # Порог в 3 слова - оптимальный для отсечения общих фраз.
+        if len(message_lower.split()) > 3:
+            return None
+
         for keyword, response in self.fast_responses.items():
             if keyword in message_lower:
-                if keyword in ['пробный', 'записаться']: return f"{response}\n\n🔗 {config.get_lesson_url(user_id=chat_id)}"
+                self.logger.info(f"⚡️ Сработал быстрый ответ по ключу '{keyword}'")
+                if keyword in ['пробный', 'записаться', 'урок']:
+                    return f"{response}\n\n🔗 {config.get_lesson_url(user_id=chat_id)}"
                 return response
         return None
 
@@ -70,7 +86,7 @@ class ProductionAIService:
         self.executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="UkidoAI")
         if not llama_index_rag: raise RuntimeError("LlamaIndex RAG failed to initialize")
         self.analyzer_llm = llama_index_rag.llm
-        self.logger.info("🚀 ProductionAIService (v7) готов")
+        self.logger.info("🚀 ProductionAIService (v12) готов")
 
     def _should_use_humor(self, user_message: str, history: List[str]) -> bool:
         message_lower = user_message.lower()
@@ -109,9 +125,18 @@ class ProductionAIService:
                 self.logger.info(f"⚡️ Быстрый ответ для {chat_id}")
             else:
                 current_state = conversation_manager.get_dialogue_state(chat_id)
+                
                 conversation_history = conversation_manager.get_conversation_history(chat_id)
+                
                 use_humor = self._should_use_humor(user_message, conversation_history)
-                response_text, rag_metrics = llama_index_rag.search_and_answer(query=user_message, conversation_history=conversation_history, current_state=current_state, use_humor=use_humor)
+                
+                response_text, rag_metrics = llama_index_rag.search_and_answer(
+                    query=user_message,
+                    conversation_history=conversation_history,
+                    current_state=current_state,
+                    use_humor=use_humor
+                )
+                
                 is_error_response = "ошибка" in response_text.lower()
                 if not is_error_response:
                     processed_response = self._process_action_tokens(response_text, chat_id)
@@ -119,7 +144,6 @@ class ProductionAIService:
                     new_state = conversation_manager.analyze_message_for_state_transition(user_message, current_state)
                     if new_state != current_state:
                         conversation_manager.set_dialogue_state(chat_id, new_state)
-                        self.logger.info(f"Состояние для {chat_id} изменено: {current_state} -> {new_state}")
                     final_response = processed_response
                 else:
                     self.logger.warning(f"❗️ Обнаружен ответ с ошибкой, не сохраняем в историю: '{response_text}'")
@@ -140,11 +164,10 @@ class ProductionAIService:
 production_ai_service = ProductionAIService()
 app = Flask(__name__)
 
-# ✅ КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ: ВОЗВРАЩАЕМ ВСЕ ЭНДПОИНТЫ
 @app.route('/', methods=['POST', 'GET'])
 def handle_telegram_webhook():
     if request.method == 'GET':
-        return "Ukido AI Assistant (v7) is running! 🚀", 200
+        return "Ukido AI Assistant (v12) is running! 🚀", 200
     try:
         update = request.get_json()
         if 'message' in update and 'text' in update['message']:
@@ -214,6 +237,23 @@ def dashboard():
             parsed_data = parse_log_file(log_file)
             if parsed_data: sessions.append(parsed_data)
     return render_template('dashboard.html', sessions=sessions)
+
+@app.route('/save-log', methods=['POST'])
+def save_log():
+    try:
+        data = request.get_json()
+        filename = data.get('filename')
+        if not filename or not isinstance(filename, str):
+            return jsonify({"status": "error", "message": "Filename is missing or invalid"}), 400
+        if not re.match(r'^[\w\-\.]+$', filename):
+             return jsonify({"status": "error", "message": "Invalid filename format"}), 400
+        success = rag_debug.save_full_log_to_file(filename)
+        if success:
+            return jsonify({"status": "success", "message": f"Log saved to {filename}"}), 200
+        else:
+            return jsonify({"status": "error", "message": "Failed to save log on server"}), 500
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
