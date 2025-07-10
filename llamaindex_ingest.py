@@ -21,6 +21,7 @@ from llama_index.core.extractors import QuestionsAnsweredExtractor
 from llama_index.vector_stores.pinecone import PineconeVectorStore
 from llama_index.embeddings.gemini import GeminiEmbedding
 from llama_index.llms.openrouter import OpenRouter
+from custom_metadata_extractor import CustomMetadataExtractor
 
 try:
     from config import config
@@ -97,6 +98,7 @@ def main():
                 embed_model=embed_model
             ),
             question_extractor,
+            CustomMetadataExtractor(),  # НОВАЯ СТРОКА
             embed_model,
         ],
     )
