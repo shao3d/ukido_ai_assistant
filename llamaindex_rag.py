@@ -18,6 +18,7 @@ from llama_index.core.llms import ChatMessage, MessageRole
 from llama_index.core.memory import ChatMemoryBuffer
 from llama_index.core.retrievers import BaseRetriever
 from llama_index.core.schema import NodeWithScore
+from llama_index.core.postprocessor.types import BaseNodePostprocessor
 
 # НОВЫЙ ИМПОРТ
 from rag_filters import SmartQueryFilter
@@ -55,6 +56,84 @@ class MetadataBoostRetriever(BaseRetriever):
         boosted_nodes = self.boost_function(nodes, self.query_intent, self.original_query)
         return boosted_nodes
 
+class MetadataBoostPostProcessor(BaseNodePostprocessor):
+    """Post-processor that applies metadata-based score boosting after reranking"""
+    query_intent: dict
+    original_query: str
+    final_top_k: int = 4
+    
+    def __init__(self, query_intent, original_query, final_top_k=4):
+        super().__init__(
+            query_intent=query_intent,
+            original_query=original_query,
+            final_top_k=final_top_k
+        )
+        
+    def _postprocess_nodes(self, nodes, query_bundle=None):
+        """Apply metadata boost and return top-k nodes"""
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        boosted_nodes = []
+        
+        for node in nodes:
+            boost_factor = 1.0
+            metadata = node.metadata if hasattr(node, 'metadata') else {}
+            
+            # Boost для ценовых запросов
+            if self.query_intent['category'] == 'pricing' and metadata.get('has_pricing', False):
+                boost_factor *= 1.5
+                
+            # Boost для особых потребностей
+            elif self.query_intent['category'] == 'special_needs' and metadata.get('has_special_needs_info', False):
+                boost_factor *= 1.6
+                
+            # Boost для курсов
+            courses = metadata.get('courses_offered', [])
+            if courses:
+                # Проверяем упоминание программирования
+                if any(word in self.original_query.lower() for word in ['программ', 'проект', 'технолог', 'компьютер']):
+                    if 'Капитан Проектов' in courses:
+                        boost_factor *= 1.4
+                        
+                # Общая проверка для всех курсов
+                if self.query_intent['category'] == 'courses':
+                    # Проверяем упоминание любого курса из списка в запросе
+                    query_lower = self.original_query.lower()
+                    for course in courses:
+                        if course.lower() in query_lower:
+                            boost_factor *= 1.4
+                            break
+                            
+            # Boost для возрастных групп
+            if metadata.get('age_groups_mentioned') and any(word in self.original_query.lower() for word in ['лет', 'возраст', 'класс', 'ребенок', 'ребёнок']):
+                boost_factor *= 1.3
+                
+            # Boost для расписания
+            if self.query_intent['category'] == 'schedule' and metadata.get('schedule_mentioned', False):
+                boost_factor *= 1.4
+                
+            # Boost для учителей
+            if any(word in self.original_query.lower() for word in ['учител', 'преподавател', 'педагог']) and metadata.get('teachers_mentioned', False):
+                boost_factor *= 1.3
+                
+            # Применяем boost
+            if hasattr(node, 'score'):
+                original_score = node.score
+                node.score = node.score * boost_factor
+                
+                # Логирование для отладки
+                if boost_factor > 1.0:
+                    logger.info(f"🚀 PostProcessor boosted chunk by {boost_factor}x - Score: {original_score:.3f} -> {node.score:.3f}")
+                    
+            boosted_nodes.append(node)
+        
+        # Сортируем по score в убывающем порядке
+        boosted_nodes.sort(key=lambda x: getattr(x, 'score', 0.0), reverse=True)
+        
+        # Обрезаем до final_top_k
+        return boosted_nodes[:self.final_top_k]
+
 class LlamaIndexRAG:
     """
     ✅ ВЕРСИЯ v12: RAG-система с умной фильтрацией и вариативными ответами.
@@ -90,7 +169,7 @@ class LlamaIndexRAG:
 
             self.reranker = SentenceTransformerRerank(
                 model="cross-encoder/ms-marco-MiniLM-L-2-v2", 
-                top_n=4
+                top_n=10
             )
 
             self.logger.info("✅ Компоненты LlamaIndexRAG (v12) успешно инициализированы.")
@@ -150,11 +229,11 @@ class LlamaIndexRAG:
             
             # Boost для ценовых запросов
             if query_intent['category'] == 'pricing' and metadata.get('has_pricing', False):
-                boost_factor *= 1.25
+                boost_factor *= 1.5
                 
             # Boost для особых потребностей
             elif query_intent['category'] == 'special_needs' and metadata.get('has_special_needs_info', False):
-                boost_factor *= 1.30
+                boost_factor *= 1.6
                 
             # Boost для курсов
             courses = metadata.get('courses_offered', [])
@@ -162,15 +241,37 @@ class LlamaIndexRAG:
                 # Проверяем упоминание программирования
                 if any(word in query.lower() for word in ['программ', 'проект', 'технолог', 'компьютер']):
                     if 'Капитан Проектов' in courses:
-                        boost_factor *= 1.20
+                        boost_factor *= 1.4
+                        
+                # Общая проверка для всех курсов
+                if query_intent['category'] == 'courses':
+                    # Проверяем упоминание любого курса из списка в запросе
+                    query_lower = query.lower()
+                    for course in courses:
+                        if course.lower() in query_lower:
+                            boost_factor *= 1.4
+                            break
+                            
+            # Boost для возрастных групп
+            if metadata.get('age_groups_mentioned') and any(word in query.lower() for word in ['лет', 'возраст', 'класс', 'ребенок', 'ребёнок']):
+                boost_factor *= 1.3
+                
+            # Boost для расписания
+            if query_intent['category'] == 'schedule' and metadata.get('schedule_mentioned', False):
+                boost_factor *= 1.4
+                
+            # Boost для учителей
+            if any(word in query.lower() for word in ['учител', 'преподавател', 'педагог']) and metadata.get('teachers_mentioned', False):
+                boost_factor *= 1.3
                         
             # Применяем boost
             if hasattr(node, 'score'):
+                original_score = node.score
                 node.score = node.score * boost_factor
                 
-            # Логирование для отладки
-            if boost_factor > 1.0:
-                self.logger.info(f"🚀 Boosted chunk by {boost_factor}x - has_pricing={metadata.get('has_pricing')}, courses={courses}")
+                # Логирование для отладки
+                if boost_factor > 1.0:
+                    self.logger.info(f"🚀 Boosted chunk by {boost_factor}x - Score: {original_score:.3f} -> {node.score:.3f} - has_pricing={metadata.get('has_pricing')}, courses={courses}")
                 
             boosted_nodes.append(node)
         
@@ -222,13 +323,20 @@ class LlamaIndexRAG:
                 original_query=query
             )
             
+            # Создаем metadata boost post-processor
+            metadata_boost_processor = MetadataBoostPostProcessor(
+                query_intent=intent,
+                original_query=query,
+                final_top_k=4
+            )
+            
             # Используем boosted_retriever в chat_engine
             chat_engine = ContextChatEngine.from_defaults(
                 retriever=boosted_retriever,
                 llm=self.llm,
                 system_prompt=system_prompt,
                 memory=ChatMemoryBuffer.from_defaults(token_limit=16384, chat_history=chat_history_messages),
-                node_postprocessors=[self.reranker]
+                node_postprocessors=[self.reranker, metadata_boost_processor]
             )
 
             history_len = len(chat_history_messages)
@@ -247,7 +355,7 @@ class LlamaIndexRAG:
                     md = node.metadata
                     self.logger.info(f"🏷️ Chunk {i+1} metadata: "
                                    f"pricing={md.get('has_pricing', '?')}, "
-                                   f"courses={md.get('course_mentioned', '?')}, "
+                                   f"courses={md.get('courses_offered', '?')}, "
                                    f"special={md.get('has_special_needs_info', '?')}, "
                                    f"category={md.get('content_category', '?')}")
             
