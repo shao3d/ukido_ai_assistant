@@ -5,6 +5,7 @@ from typing import Dict, List, Any
 def extract_metadata(text: str) -> Dict[str, Any]:
     """
     Извлекает ключевые метаданные из текста для RAG системы школы Ukido.
+    Возвращает плоские метаданные без вложенных словарей.
     
     ТОП-10 самых важных полей для решения проблемных запросов:
     1. pricing_and_discounts - для запросов "Скидки есть?"
@@ -23,19 +24,51 @@ def extract_metadata(text: str) -> Dict[str, Any]:
     metadata = {}
     
     # 1. PRICING_AND_DISCOUNTS - для "Скидки есть?"
-    metadata["pricing_and_discounts"] = _extract_pricing_info(text, text_lower)
+    pricing_info = _extract_pricing_info(text, text_lower)
+    metadata.update({
+        "has_pricing": pricing_info["has_pricing"],
+        "prices_mentioned": pricing_info["prices_mentioned"],
+        "discount_types": pricing_info["discount_types"],
+        "payment_methods": pricing_info["payment_methods"],
+        "refund_conditions": pricing_info["refund_conditions"]
+    })
     
     # 2. SPECIAL_NEEDS - для "Для моего сына с диабетом"
-    metadata["special_needs"] = _extract_special_needs(text, text_lower)
+    special_needs = _extract_special_needs(text, text_lower)
+    metadata.update({
+        "has_special_needs_info": special_needs["has_special_needs_info"],
+        "conditions_supported": special_needs["conditions_supported"],
+        "adaptations": special_needs["adaptations"],
+        "learning_styles": special_needs["learning_styles"]
+    })
     
     # 3. SKILLS_AND_COMPETENCIES - для "Сын увлекается программированием"
-    metadata["skills_and_competencies"] = _extract_skills(text, text_lower)
+    skills_info = _extract_skills(text, text_lower)
+    metadata.update({
+        "primary_skills": skills_info["primary_skills"],
+        "skills_courses_offered": skills_info["courses_offered"],
+        "soft_skills_categories": skills_info["soft_skills_categories"]
+    })
     
     # 4. AGE_GROUPS - критично для рекомендаций
-    metadata["age_groups"] = _extract_age_groups(text, text_lower)
+    age_info = _extract_age_groups(text, text_lower)
+    metadata.update({
+        "min_age": age_info["min_age"],
+        "max_age": age_info["max_age"],
+        "age_groups_mentioned": age_info["age_groups_mentioned"],
+        "courses_by_age": age_info["courses_by_age"]
+    })
     
     # 5. TIME_PARAMETERS - для планирования
-    metadata["time_parameters"] = _extract_time_parameters(text, text_lower)
+    time_info = _extract_time_parameters(text, text_lower)
+    metadata.update({
+        "lesson_duration": time_info["lesson_duration"],
+        "lessons_per_week": time_info["lessons_per_week"],
+        "course_duration_months": time_info["course_duration_months"],
+        "schedule_times": time_info["schedule_times"],
+        "homework_time": time_info["homework_time"],
+        "group_size_mentioned": time_info["group_size_mentioned"]
+    })
     
     # 6. COURSES_OFFERED - основной продукт
     metadata["courses_offered"] = _extract_courses(text, text_lower)
@@ -44,13 +77,29 @@ def extract_metadata(text: str) -> Dict[str, Any]:
     metadata["content_category"] = _extract_content_category(text, text_lower)
     
     # 8. TECHNICAL_REQUIREMENTS - для техподдержки
-    metadata["technical_requirements"] = _extract_tech_requirements(text, text_lower)
+    tech_info = _extract_tech_requirements(text, text_lower)
+    metadata.update({
+        "has_tech_requirements": tech_info["has_tech_requirements"],
+        "platforms_mentioned": tech_info["platforms_mentioned"],
+        "internet_speed": tech_info["internet_speed"],
+        "devices": tech_info["devices"]
+    })
     
     # 9. SUPPORT_AND_SAFETY - для безопасности
-    metadata["support_and_safety"] = _extract_safety_info(text, text_lower)
+    safety_info = _extract_safety_info(text, text_lower)
+    metadata.update({
+        "has_safety_info": safety_info["has_safety_info"],
+        "safety_measures": safety_info["safety_measures"],
+        "data_protection": safety_info["data_protection"]
+    })
     
     # 10. ACHIEVEMENTS_STATISTICS - для эффективности
-    metadata["achievements_statistics"] = _extract_achievements(text, text_lower)
+    achievements = _extract_achievements(text, text_lower)
+    metadata.update({
+        "has_statistics": achievements["has_statistics"],
+        "success_rates": achievements["success_rates"],
+        "student_numbers": achievements["student_numbers"]
+    })
     
     return metadata
 
