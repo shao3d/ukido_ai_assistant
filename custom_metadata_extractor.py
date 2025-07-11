@@ -2,6 +2,7 @@
 Кастомный экстрактор метаданных для LlamaIndex
 Анализирует содержимое node.text и добавляет дополнительные метаданные
 для улучшения качества поиска в RAG системе.
+Использует оптимизированную функцию extract_metadata() с топ-10 полями.
 """
 
 import re
@@ -9,6 +10,7 @@ import logging
 from typing import List, Dict, Any, Optional, Sequence
 from llama_index.core.extractors import BaseExtractor
 from llama_index.core.schema import BaseNode
+from extract_metadata import extract_metadata
 
 # Настройка логирования
 logger = logging.getLogger(__name__)
@@ -118,7 +120,7 @@ class CustomMetadataExtractor(BaseExtractor):
             r"Ответ:"
         ]
         
-        logger.info("✅ CustomMetadataExtractor инициализирован")
+        logger.info("✅ CustomMetadataExtractor инициализирован с новой функцией extract_metadata()")
     
     def _determine_content_type(self, text: str) -> str:
         """
@@ -158,19 +160,19 @@ class CustomMetadataExtractor(BaseExtractor):
             
             # Проверяем каждый вариант названия курса
             for variant in search_variants:
-                # Создаем паттерны для поиска с кавычками и без
-                patterns = [
-                    rf'["\']?{re.escape(variant)}["\']?',  # С кавычками или без
-                    rf'{re.escape(variant)}',              # Точное совпадение
-                ]
-                
-                # Проверяем каждый паттерн
-                for pattern in patterns:
-                    if re.search(pattern, text, re.IGNORECASE):
-                        found = True
-                        break
-                
-                if found:
+                # Простая проверка - есть ли вариант в тексте (без учета регистра)
+                if variant.lower() in text.lower():
+                    found = True
+                    break
+                    
+                # Дополнительная проверка с кавычками
+                if f'"{variant}"' in text or f"'{variant}'" in text:
+                    found = True
+                    break
+                    
+                # Проверка с экранированными кавычками
+                if f'«{variant}»' in text:
+                    found = True
                     break
             
             if found and course_name not in mentioned_courses:
@@ -206,30 +208,28 @@ class CustomMetadataExtractor(BaseExtractor):
     
     def _extract_metadata_from_text(self, text: str) -> Dict[str, Any]:
         """
-        Извлекает все метаданные из текста узла
+        Извлекает все метаданные из текста узла используя новую функцию extract_metadata()
+        с топ-10 полями для решения проблемных запросов
         """
-        metadata = {}
+        # Используем новую оптимизированную функцию
+        extracted_metadata = extract_metadata(text)
         
-        # Определяем тип контента
-        metadata["content_type"] = self._determine_content_type(text)
+        # Добавляем совместимость со старыми полями для обратной совместимости
+        legacy_metadata = {}
         
-        # Проверяем наличие ценовой информации
-        metadata["has_pricing"] = self._has_pricing_info(text)
+        # Маппинг новых полей на старые для совместимости
+        legacy_metadata["content_type"] = extracted_metadata.get("content_category", "general")
+        legacy_metadata["has_pricing"] = extracted_metadata.get("pricing_and_discounts", {}).get("has_pricing", False)
+        legacy_metadata["course_mentioned"] = extracted_metadata.get("courses_offered", [])
+        legacy_metadata["is_teacher_info"] = bool(extracted_metadata.get("teacher_and_methodology", {}).get("teachers_mentioned", []))
+        legacy_metadata["is_faq"] = extracted_metadata.get("content_category") == "FAQ"
+        legacy_metadata["text_length"] = len(text)
+        legacy_metadata["has_courses"] = len(legacy_metadata["course_mentioned"]) > 0
         
-        # Находим упоминания курсов
-        metadata["course_mentioned"] = self._find_mentioned_courses(text)
+        # Объединяем новые и старые метаданные
+        combined_metadata = {**extracted_metadata, **legacy_metadata}
         
-        # Проверяем, является ли это информацией о преподавателях
-        metadata["is_teacher_info"] = self._is_teacher_info(text)
-        
-        # Проверяем, является ли это FAQ
-        metadata["is_faq"] = self._is_faq(text)
-        
-        # Дополнительные метаданные
-        metadata["text_length"] = len(text)
-        metadata["has_courses"] = len(metadata["course_mentioned"]) > 0
-        
-        return metadata
+        return combined_metadata
     
     def extract(self, nodes: Sequence[BaseNode]) -> List[Dict[str, Any]]:
         """
@@ -258,6 +258,24 @@ class CustomMetadataExtractor(BaseExtractor):
                 # Извлекаем метаданные
                 extracted_metadata = self._extract_metadata_from_text(text)
                 
+                # Проверяем курсы в существующих метаданных (например, в вопросах)
+                existing_metadata = getattr(node, 'metadata', {})
+                if existing_metadata:
+                    # Ищем курсы в других полях метаданных
+                    for key, value in existing_metadata.items():
+                        if isinstance(value, (str, list)):
+                            # Если это список, объединяем в строку
+                            search_text = ' '.join(value) if isinstance(value, list) else value
+                            # Находим курсы в этом тексте
+                            additional_courses = self._find_mentioned_courses(search_text)
+                            # Добавляем найденные курсы к основным
+                            for course in additional_courses:
+                                if course not in extracted_metadata["course_mentioned"]:
+                                    extracted_metadata["course_mentioned"].append(course)
+                    
+                    # Обновляем has_courses после добавления курсов
+                    extracted_metadata["has_courses"] = len(extracted_metadata["course_mentioned"]) > 0
+                
                 # Добавляем метаданные к существующим метаданным узла
                 if hasattr(node, 'metadata') and node.metadata:
                     # Объединяем существующие метаданные с новыми
@@ -268,9 +286,16 @@ class CustomMetadataExtractor(BaseExtractor):
                 
                 metadata_list.append(extracted_metadata)
                 
-                # Логируем результат для первых нескольких узлов
+                # Логируем результат для первых нескольких узлов (только ключевые поля)
                 if i < 3:
-                    logger.info(f"✅ Узел {i}: {extracted_metadata}")
+                    key_fields = {
+                        "content_category": extracted_metadata.get("content_category"),
+                        "pricing_info": extracted_metadata.get("pricing_and_discounts", {}).get("has_pricing", False),
+                        "special_needs": extracted_metadata.get("special_needs", {}).get("has_special_needs_info", False),
+                        "courses": extracted_metadata.get("courses_offered", []),
+                        "age_groups": extracted_metadata.get("age_groups", {}).get("age_groups_mentioned", [])
+                    }
+                    logger.info(f"✅ Узел {i}: {key_fields}")
                 
             except Exception as e:
                 logger.error(f"❌ Ошибка при обработке узла {i}: {e}")
@@ -304,12 +329,12 @@ if __name__ == "__main__":
     # Создаем тестовый экстрактор
     extractor = CustomMetadataExtractor()
     
-    # Тестовые тексты
+    # Тестовые тексты для проверки новой функциональности
     test_texts = [
-        "Курс Капитан Проектов стоит 2500 грн. Скидка 20% для ранних регистраций.",
-        "КВАЛИФИКАЦИЯ: Преподаватель имеет 10 лет опыта. ОБРАЗОВАНИЕ: Магистр психологии.",
-        "Q: Сколько длится курс Юный Оратор? A: Курс длится 8 недель.",
-        "Программа курса Эмоциональный Компас включает 12 модулей обучения."
+        "Курс Капитан Проектов стоит 6000 грн. Семейная скидка 15% для двух детей.",
+        "Для детей с СДВГ мы используем короткие блоки 5-7 минут и визуальные подсказки.",
+        "Сын увлекается программированием - рекомендуем курс Капитан Проектов для возраста 11-14 лет.",
+        "Анна Коваленко ведет курс Юный Оратор для детей 7-10 лет. Опыт 8 лет."
     ]
     
     # Создаем псевдо-узлы для тестирования
