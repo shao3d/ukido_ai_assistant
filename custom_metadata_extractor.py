@@ -219,9 +219,9 @@ class CustomMetadataExtractor(BaseExtractor):
         
         # Маппинг новых полей на старые для совместимости
         legacy_metadata["content_type"] = extracted_metadata.get("content_category", "general")
-        legacy_metadata["has_pricing"] = extracted_metadata.get("pricing_and_discounts", {}).get("has_pricing", False)
+        legacy_metadata["has_pricing"] = extracted_metadata.get("has_pricing", False)
         legacy_metadata["course_mentioned"] = extracted_metadata.get("courses_offered", [])
-        legacy_metadata["is_teacher_info"] = bool(extracted_metadata.get("teacher_and_methodology", {}).get("teachers_mentioned", []))
+        legacy_metadata["is_teacher_info"] = False  # Убираем ссылку на несуществующее поле
         legacy_metadata["is_faq"] = extracted_metadata.get("content_category") == "FAQ"
         legacy_metadata["text_length"] = len(text)
         legacy_metadata["has_courses"] = len(legacy_metadata["course_mentioned"]) > 0
@@ -290,10 +290,10 @@ class CustomMetadataExtractor(BaseExtractor):
                 if i < 3:
                     key_fields = {
                         "content_category": extracted_metadata.get("content_category"),
-                        "pricing_info": extracted_metadata.get("pricing_and_discounts", {}).get("has_pricing", False),
-                        "special_needs": extracted_metadata.get("special_needs", {}).get("has_special_needs_info", False),
+                        "pricing_info": extracted_metadata.get("has_pricing", False),
+                        "special_needs": extracted_metadata.get("has_special_needs_info", False),
                         "courses": extracted_metadata.get("courses_offered", []),
-                        "age_groups": extracted_metadata.get("age_groups", {}).get("age_groups_mentioned", [])
+                        "age_groups": extracted_metadata.get("age_groups_mentioned", [])
                     }
                     logger.info(f"✅ Узел {i}: {key_fields}")
                 

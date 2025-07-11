@@ -53,20 +53,22 @@ def extract_metadata(text: str) -> Dict[str, Any]:
     # 4. AGE_GROUPS - критично для рекомендаций
     age_info = _extract_age_groups(text, text_lower)
     metadata.update({
-        "min_age": age_info["min_age"],
-        "max_age": age_info["max_age"],
-        "age_groups_mentioned": age_info["age_groups_mentioned"],
-        "courses_by_age": age_info["courses_by_age"]
+        "min_age": str(age_info["min_age"]) if age_info["min_age"] is not None else "",
+        "max_age": str(age_info["max_age"]) if age_info["max_age"] is not None else "",
+        "age_groups_mentioned": age_info["age_groups_mentioned"]
     })
+    # Добавляем courses_by_age как плоские поля
+    for age_range, course in age_info["courses_by_age"].items():
+        metadata[f"course_for_age_{age_range}"] = course
     
     # 5. TIME_PARAMETERS - для планирования
     time_info = _extract_time_parameters(text, text_lower)
     metadata.update({
-        "lesson_duration": time_info["lesson_duration"],
-        "lessons_per_week": time_info["lessons_per_week"],
-        "course_duration_months": time_info["course_duration_months"],
+        "lesson_duration": str(time_info["lesson_duration"]) if time_info["lesson_duration"] is not None else "",
+        "lessons_per_week": str(time_info["lessons_per_week"]) if time_info["lessons_per_week"] is not None else "",
+        "course_duration_months": [str(m) for m in time_info["course_duration_months"]],
         "schedule_times": time_info["schedule_times"],
-        "homework_time": time_info["homework_time"],
+        "homework_time": time_info["homework_time"] if time_info["homework_time"] is not None else "",
         "group_size_mentioned": time_info["group_size_mentioned"]
     })
     
@@ -81,7 +83,7 @@ def extract_metadata(text: str) -> Dict[str, Any]:
     metadata.update({
         "has_tech_requirements": tech_info["has_tech_requirements"],
         "platforms_mentioned": tech_info["platforms_mentioned"],
-        "internet_speed": tech_info["internet_speed"],
+        "internet_speed": tech_info["internet_speed"] if tech_info["internet_speed"] is not None else "",
         "devices": tech_info["devices"]
     })
     
@@ -455,19 +457,51 @@ def _extract_time_parameters(text: str, text_lower: str) -> Dict[str, Any]:
 
 
 def _extract_courses(text: str, text_lower: str) -> List[str]:
-    """Извлекает упоминания курсов"""
+    """Извлекает упоминания курсов с учетом разных вариантов написания"""
     courses = []
-    course_keywords = {
-        "юный оратор": "Юный Оратор",
-        "эмоциональный компас": "Эмоциональный Компас",
-        "капитан проектов": "Капитан Проектов", 
-        "профессии будущего": "Профессии будущего"
+    
+    # Паттерны для поиска курсов с разными кавычками и форматами
+    course_patterns = {
+        "Юный Оратор": [
+            r'"юный оратор"',      # "Юный Оратор"
+            r"'юный оратор'",      # 'Юный Оратор'  
+            r'«юный оратор»',      # «Юный Оратор»
+            r'юный оратор',        # Юный Оратор (без кавычек)
+            r'курс\s+"?юный оратор"?',  # курс "Юный Оратор" или курс Юный Оратор
+        ],
+        "Эмоциональный Компас": [
+            r'"эмоциональный компас"',
+            r"'эмоциональный компас'",
+            r'«эмоциональный компас»',
+            r'эмоциональный компас',
+            r'курс\s+"?эмоциональный компас"?',
+        ],
+        "Капитан Проектов": [
+            r'"капитан проектов"',
+            r"'капитан проектов'",
+            r'«капитан проектов»',
+            r'капитан проектов',
+            r'курс\s+"?капитан проектов"?',
+        ],
+        "Профессии будущего": [
+            r'"профессии будущего"',
+            r"'профессии будущего'",
+            r'«профессии будущего»',
+            r'профессии будущего',
+            r'курс\s+"?профессии будущего"?',
+        ]
     }
     
-    for keyword, course_name in course_keywords.items():
-        if keyword in text_lower:
-            if course_name not in courses:
-                courses.append(course_name)
+    # Ищем каждый курс по всем паттернам
+    for course_name, patterns in course_patterns.items():
+        found = False
+        for pattern in patterns:
+            if re.search(pattern, text_lower, re.IGNORECASE):
+                found = True
+                break
+        
+        if found and course_name not in courses:
+            courses.append(course_name)
     
     return courses
 
@@ -617,12 +651,12 @@ if __name__ == "__main__":
     result = extract_metadata(test_text_full_doc)
     
     print("\n--- ИЗВЛЕЧЕННЫЕ ВРЕМЕННЫЕ ПАРАМЕТРЫ ---")
-    print(f"Длительности курсов (в месяцах): {result['time_parameters']['course_duration_months']}")
-    print(f"Размеры групп: {result['time_parameters']['group_size_mentioned']}")
+    print(f"Длительности курсов (в месяцах): {result['course_duration_months']}")
+    print(f"Размеры групп: {result['group_size_mentioned']}")
     
     print("\n--- ИЗВЛЕЧЕННАЯ СТАТИСТИКА ---")
-    print(f"Показатели успеха (%): {result['achievements_statistics']['success_rates']}")
-    print(f"Количество учеников (общие цифры): {result['achievements_statistics']['student_numbers']}")
+    print(f"Показатели успеха (%): {result['success_rates']}")
+    print(f"Количество учеников (общие цифры): {result['student_numbers']}")
 
     print("\nПолный JSON:")
     print(json.dumps(result, indent=4, ensure_ascii=False))
