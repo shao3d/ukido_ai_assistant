@@ -1,10 +1,11 @@
 """
 Тестирование улучшений метаданных с CustomMetadataExtractor
-Обрабатывает файл data_facts/faq.md и показывает результаты анализа.
+Обрабатывает указанный файл и показывает результаты анализа.
 """
 
 import logging
 import os
+import argparse
 from collections import Counter
 from llama_index.core import (
     SimpleDirectoryReader,
@@ -31,8 +32,8 @@ except ImportError:
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Константы
-TEST_FILE = "data_facts/faq.md"
+# Константы по умолчанию
+DEFAULT_TEST_FILE = "data_facts/faq.md"
 QUESTIONS_FILE = "questions.txt"
 
 def load_questions(filepath: str) -> str:
@@ -203,14 +204,53 @@ def display_statistics(chunks):
     else:
         print(f"\n🎓 Курсы не упоминаются в данном файле")
 
+def parse_arguments():
+    """Парсит аргументы командной строки."""
+    parser = argparse.ArgumentParser(
+        description="Тестирование улучшений метаданных с CustomMetadataExtractor",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Примеры использования:
+  python test_new_metadata.py                           # Использует файл по умолчанию: data_facts/faq.md
+  python test_new_metadata.py --file data_facts/pricing.md
+  python test_new_metadata.py --file data_facts/courses_detailed.md
+  python test_new_metadata.py -f data_facts/methodology.md
+        """
+    )
+    
+    parser.add_argument(
+        '--file', '-f',
+        type=str,
+        default=DEFAULT_TEST_FILE,
+        help=f'Путь к файлу для тестирования (по умолчанию: {DEFAULT_TEST_FILE})'
+    )
+    
+    return parser.parse_args()
+
 def main():
     """Основная функция для тестирования."""
+    # Парсим аргументы командной строки
+    args = parse_arguments()
+    test_file = args.file
+    
     print("🧪 ТЕСТИРОВАНИЕ УЛУЧШЕНИЙ МЕТАДАННЫХ")
+    print("=" * 60)
+    print(f"📁 Тестируемый файл: {test_file}")
     print("=" * 60)
     
     # Проверяем наличие файла
-    if not os.path.exists(TEST_FILE):
-        print(f"❌ Файл '{TEST_FILE}' не найден!")
+    if not os.path.exists(test_file):
+        print(f"❌ Файл '{test_file}' не найден!")
+        print(f"\n💡 Убедитесь, что файл существует по указанному пути.")
+        print(f"📋 Доступные файлы в data_facts/:")
+        
+        # Показываем доступные файлы в data_facts, если папка существует
+        data_facts_dir = "data_facts"
+        if os.path.exists(data_facts_dir):
+            files = [f for f in os.listdir(data_facts_dir) if f.endswith('.md')]
+            for file in sorted(files):
+                print(f"  • {os.path.join(data_facts_dir, file)}")
+        
         return
     
     try:
@@ -221,9 +261,9 @@ def main():
         pipeline = create_pipeline(llm, embed_model)
         
         # Загружаем документ
-        logger.info(f"📂 Загрузка документа '{TEST_FILE}'...")
+        logger.info(f"📂 Загрузка документа '{test_file}'...")
         documents = SimpleDirectoryReader(
-            input_files=[TEST_FILE]
+            input_files=[test_file]
         ).load_data()
         
         # Обрабатываем документ
@@ -232,9 +272,9 @@ def main():
         
         logger.info(f"✅ Создано {len(chunks)} чанков.")
         
-        # Показываем первые 3 чанка
-        print(f"\n🔍 АНАЛИЗ ПЕРВЫХ 3 ЧАНКОВ:")
-        for i, chunk in enumerate(chunks[:3], 1):
+        # Показываем первые 6 чанков
+        print(f"\n🔍 АНАЛИЗ ПЕРВЫХ 6 ЧАНКОВ:")
+        for i, chunk in enumerate(chunks[:6], 1):
             display_chunk_details(chunk, i)
         
         # Показываем общую статистику
